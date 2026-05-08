@@ -19,14 +19,13 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
 
-# --- 3. 飞书权限与变量解析 ---
+# --- 3. 飞书变量解析 ---
 export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
 export FEISHU_APP_SECRET="${FEISHU_APP_SECRET:-}"
 export FEISHU_DOMAIN="${FEISHU_DOMAIN:-feishu}"
 export FEISHU_DM_POLICY="${FEISHU_DM_POLICY:-pairing}"
 export FEISHU_ENABLED=$([[ -n "${FEISHU_APP_ID}" ]] && echo "true" || echo "false")
 
-# 解析 FEISHU_ALLOW_FROM 为 JSON 数组
 FEISHU_ALLOW_FROM="${FEISHU_ALLOW_FROM:-}"
 export FEISHU_ALLOW_FROM_JSON="[]"
 if [[ -n "${FEISHU_ALLOW_FROM}" ]]; then
@@ -42,7 +41,7 @@ if [[ "${FEISHU_ENABLED}" == "true" ]]; then
 fi
 
 # --- 4. 配置文件生成 ---
-echo "[config] Rendering openclaw.json from template..."
+echo "[config] Rendering openclaw.json..."
 template_path="/app/docker/openclaw.template.json"
 export BROWSER_CONTROL_TOKEN="${BROWSER_CONTROL_TOKEN:-openclaw_static_token}"
 
@@ -65,7 +64,6 @@ node -e '
     .replace(/\$\{SILICONFLOW_API_KEY\}/g, getEnv("SILICONFLOW_API_KEY"));
 
   let cfg = JSON.parse(cfgRaw);
-
   if (process.env.FEISHU_ENABLED === "true") {
     cfg.channels = cfg.channels || {};
     cfg.channels.feishu = {
@@ -76,34 +74,38 @@ node -e '
       dmPolicy: getEnv("FEISHU_DM_POLICY"),
       allowFrom: JSON.parse(getEnv("FEISHU_ALLOW_FROM_JSON", "[]")),
       accounts: {
-        main: {
-          appId: process.env.FEISHU_APP_ID,
-          appSecret: process.env.FEISHU_APP_SECRET,
-          domain: getEnv("FEISHU_DOMAIN")
-        }
+        main: { appId: process.env.FEISHU_APP_ID, appSecret: process.env.FEISHU_APP_SECRET, domain: getEnv("FEISHU_DOMAIN") }
       }
     };
   }
-  
   fs.writeFileSync(process.env.OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2));
 ' "${template_path}"
 
-# --- 5. 飞书插件补全 ---
+# --- 5. 飞书插件物理修复 (轻量级 Tarball 方案) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ] && [ ! -f "$FEISHU_DIR/index.js" ]; then
-  echo "[patch] Feishu runtime missing. Installing..."
-  mkdir -p /tmp/feishu_install
-  npm install --no-save --prefix /tmp/feishu_install @openclaw/feishu --registry=https://registry.npmmirror.com > /tmp/npm.log 2>&1 || true
+  echo "[patch] Feishu runtime missing. Downloading via Tarball (Low Memory Mode)..."
+  # 获取下载地址并解压，避开 npm install 的高内存消耗
+  mkdir -p /tmp/feishu_tar
+  # 直接从 npmmirror 获取最新版本的 tgz 地址并下载
+  TAR_URL=$(curl -s https://registry.npmmirror.com/@openclaw/feishu/latest | node -e '
+    const input = require("fs").readFileSync(0, "utf8");
+    try { console.log(JSON.parse(input).dist.tarball); } catch(e) { process.exit(1); }
+  ')
   
-  SRC="/tmp/feishu_install/node_modules/@openclaw/feishu"
-  if [ -f "$SRC/index.js" ] || [ -f "$SRC/index.mjs" ]; then
-    cp -r "$SRC"/* "$FEISHU_DIR/"
-    [ -f "$FEISHU_DIR/index.mjs" ] && mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
+  if [[ -n "${TAR_URL}" ]]; then
+    curl -L "${TAR_URL}" -o /tmp/feishu.tgz
+    tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
+    # npm 压缩包内容通常在 package 文件夹下
+    cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/"
+    [ -f "$FEISHU_DIR/index.mjs" ] && [ ! -f "$FEISHU_DIR/index.js" ] && mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
     echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; } // BRIDGE" > /tmp/b.js
     cat "$FEISHU_DIR/index.js" >> /tmp/b.js
     mv /tmp/b.js "$FEISHU_DIR/index.js"
     chmod -R 755 "$FEISHU_DIR"
-    echo "[patch] Feishu plugin restored."
+    echo "[patch] Feishu plugin restored via Tarball."
+  else
+    echo "[patch] FAILED to resolve Feishu Tarball URL."
   fi
 fi
 
