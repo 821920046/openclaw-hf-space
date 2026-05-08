@@ -84,7 +84,8 @@ node -e '
 # --- 5. 飞书插件物理修复 & 兼容性手术 ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
-  if [ ! -f "$FEISHU_DIR/index.js" ]; then
+  # 如果 index.js 不在根目录且不在 dist 目录，说明没安装
+  if [ ! -f "$FEISHU_DIR/index.js" ] && [ ! -f "$FEISHU_DIR/dist/index.js" ]; then
     echo "[patch] Downloading Tarball..."
     mkdir -p /tmp/feishu_tar
     TAR_URL=$(curl -s https://registry.npmmirror.com/@openclaw/feishu/latest | node -e '
@@ -94,26 +95,25 @@ if [ -d "$FEISHU_DIR" ]; then
     if [[ -n "${TAR_URL}" ]]; then
       curl -L "${TAR_URL}" -o /tmp/feishu.tgz
       tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
-      if [ -d "/tmp/feishu_tar/package/dist" ]; then
+      if [ -d "/tmp/feishu_tar/package" ]; then
         cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/"
-        mv "$FEISHU_DIR/dist/index.js" "$FEISHU_DIR/index.js" 2>/dev/null || true
       fi
     fi
   fi
 
-  # 执行兼容性手术：修复 missing export 报错
-  if [ -f "$FEISHU_DIR/index.js" ]; then
-    echo "[patch] Applying compatibility surgery for v2026.5.3-1..."
+  # 寻找真正的入口点文件并进行手术
+  REAL_ENTRY=$(find "$FEISHU_DIR" -name "index.js" | head -n 1)
+  if [ -f "$REAL_ENTRY" ]; then
+    echo "[patch] Applying compatibility surgery to $REAL_ENTRY..."
     
-    # 定义 Mock 函数并注入到 index.js 头部
-    # 针对报错：formatChannelProgressDraftLineForEntry
-    sed -i "1i var formatChannelProgressDraftLineForEntry = (v) => v;" "$FEISHU_DIR/index.js"
+    # 定义 Mock 函数并注入
+    sed -i "1i var formatChannelProgressDraftLineForEntry = (v) => v;" "$REAL_ENTRY"
     
     # 注入 CJS 桥接
-    if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
-      echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; } // OPENCLAW_CJS_BRIDGE" > /tmp/b.js
-      cat "$FEISHU_DIR/index.js" >> /tmp/b.js
-      mv /tmp/b.js "$FEISHU_DIR/index.js"
+    if ! grep -q "OPENCLAW_CJS_BRIDGE" "$REAL_ENTRY"; then
+      echo "if (typeof __dirname === 'undefined') { global.__dirname = '$(dirname "$REAL_ENTRY")'; } // OPENCLAW_CJS_BRIDGE" > /tmp/b.js
+      cat "$REAL_ENTRY" >> /tmp/b.js
+      mv /tmp/b.js "$REAL_ENTRY"
     fi
     chmod -R 755 "$FEISHU_DIR"
     echo "[patch] Feishu plugin patched and compat-fixed."
