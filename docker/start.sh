@@ -426,26 +426,35 @@ fi
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
 
-# --- 飞书插件入口修复 (精准定位版) ---
+# --- 飞书插件入口修复 (动态安装版) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
-FEISHU_CH_DIR="/app/openclaw/dist/channels/feishu"
+FEISHU_NM_DIR="/app/openclaw/node_modules/@openclaw/extension-feishu"
 
 if [ -d "$FEISHU_DIR" ]; then
   echo "[patch] Checking feishu entry points..."
   
-  # 如果 extensions 里没 index.js，但 channels 里有，则同步过去
+  # 1. 尝试从 node_modules 恢复 (某些版本安装在这里)
+  if [ ! -f "$FEISHU_DIR/index.js" ] && [ -d "$FEISHU_NM_DIR" ]; then
+    echo "[patch] Found feishu in node_modules. Recovering to extensions..."
+    cp -r "$FEISHU_NM_DIR"/* "$FEISHU_DIR/" 2>/dev/null || true
+  fi
+
+  # 2. 如果依然没有，尝试通过 openclaw 命令安装 (需要联网)
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
-    if [ -f "$FEISHU_CH_DIR/index.js" ]; then
-      echo "[patch] Found feishu entry in channels. Linking to extensions..."
-      cp -r "$FEISHU_CH_DIR"/* "$FEISHU_DIR/" 2>/dev/null || true
-    elif [ -f "$FEISHU_DIR/index.mjs" ]; then
-      mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
-    elif [ -f "$FEISHU_DIR/index.cjs" ]; then
-      mv "$FEISHU_DIR/index.cjs" "$FEISHU_DIR/index.js"
+    echo "[patch] Feishu index.js STILL missing. Attempting internal install..."
+    # 尝试使用 openclaw 命令行工具（如果存在）
+    if command -v openclaw &>/dev/null; then
+      openclaw extension install feishu --force || true
     fi
   fi
 
-  # 最终补全 package.json
+  # 3. 再次对齐 index.js
+  if [ ! -f "$FEISHU_DIR/index.js" ]; then
+    [ -f "$FEISHU_DIR/index.mjs" ] && mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
+    [ -f "$FEISHU_DIR/index.cjs" ] && mv "$FEISHU_DIR/index.cjs" "$FEISHU_DIR/index.js"
+  fi
+
+  # 4. 强制重构 package.json
   node -e '
     const fs = require("fs");
     const p = "/app/openclaw/dist/extensions/feishu/package.json";
@@ -459,7 +468,7 @@ if [ -d "$FEISHU_DIR" ]; then
     fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
   '
 
-  # 桥接与权限 (仅在 index.js 存在时执行)
+  # 5. 桥接与权限
   if [ -f "$FEISHU_DIR/index.js" ]; then
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
       echo "// OPENCLAW_CJS_BRIDGE" > /tmp/feishu-cjs.js
@@ -470,7 +479,7 @@ if [ -d "$FEISHU_DIR" ]; then
     chmod -R 755 "$FEISHU_DIR"
     echo "[patch] Feishu plugin patched."
   else
-    echo "[patch] WARNING: index.js still missing. Feishu may not load."
+    echo "[patch] CRITICAL: Feishu runtime file NOT FOUND even after recovery attempts."
   fi
 fi
 
