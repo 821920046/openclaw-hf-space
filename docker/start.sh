@@ -426,44 +426,54 @@ fi
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
 
-# --- 飞书插件兼容性修复 (强制 CJS 降级版) ---
-# 根因：Gateway (v2026.5.3) 的插件加载器对 extensions 目录下的 ESM 插件扫描存在不确定性。
-# 策略：不管原始格式如何，强制将其降级为 CommonJS 格式，并注入绝对路径桥接。
+# --- 飞书插件兼容性修复 (核弹级强制加载版) ---
+# 根因：Gateway (v2026.5.3) 扫描 extensions 时，若 package.json 缺少字段或权限不足会静默跳过。
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
-  echo "[patch] Force-downgrading Feishu plugin to CJS for maximum compatibility..."
-
-  # 1. 处理 package.json
-  if [ -f "$FEISHU_DIR/package.json" ]; then
-    node -e '
-      const fs = require("fs"), p = process.argv[1];
-      const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
-      delete pkg.type; // 移除 type: module
-      pkg.main = "index.js";
-      fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
-    ' "$FEISHU_DIR/package.json"
-  fi
+  echo "[patch] Diagnostic: content of $FEISHU_DIR:"
+  ls -F "$FEISHU_DIR" || true
+  
+  echo "[patch] Re-constructing package.json for Feishu to guarantee recognition..."
+  # 强制重写一个标准格式的 package.json
+  node -e '
+    const fs = require("fs");
+    const p = "/app/openclaw/dist/extensions/feishu/package.json";
+    let pkg = {};
+    try { if (fs.existsSync(p)) pkg = JSON.parse(fs.readFileSync(p, "utf8")); } catch(e) {}
+    
+    // 强制设定关键字段，确保扫描器能够识别
+    pkg.name = "@openclaw/extension-feishu";
+    pkg.version = "1.0.0";
+    pkg.main = "index.js";
+    pkg.description = "Feishu channel extension";
+    pkg.engines = { "node": ">=20" };
+    delete pkg.type; // 确保没有 type: module
+    
+    fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
+    console.log("[patch] Final package.json:", JSON.stringify(pkg));
+  '
 
   # 2. 确保入口文件名为 index.js
   [ -f "$FEISHU_DIR/index.mjs" ] && mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
   [ -f "$FEISHU_DIR/index.cjs" ] && mv "$FEISHU_DIR/index.cjs" "$FEISHU_DIR/index.js"
 
-  # 3. 注入 CJS 桥接（包装 import 为 require 或处理 __dirname）
+  # 3. 注入 CJS 桥接
   if [ -f "$FEISHU_DIR/index.js" ]; then
-    # 检查是否已经是包装过的
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
       cat > /tmp/feishu-cjs.js << 'EOF'
 // OPENCLAW_CJS_BRIDGE
-if (typeof __dirname === 'undefined') {
-  global.__dirname = '/app/openclaw/dist/extensions/feishu';
-}
+if (typeof __dirname === 'undefined') { global.__dirname = '/app/openclaw/dist/extensions/feishu'; }
+if (typeof __filename === 'undefined') { global.__filename = '/app/openclaw/dist/extensions/feishu/index.js'; }
 EOF
       cat "$FEISHU_DIR/index.js" >> /tmp/feishu-cjs.js
       mv /tmp/feishu-cjs.js "$FEISHU_DIR/index.js"
       echo "[patch] Feishu index.js wrapped in CJS bridge."
     fi
   fi
-  echo "[patch] Feishu plugin patched (Force CJS)."
+  
+  # 4. 权限全开
+  chmod -R 777 "$FEISHU_DIR"
+  echo "[patch] Feishu plugin patched and permissions set to 777."
 fi
 
 # --- 预设设备身份防止浏览器插件报错 ---
