@@ -426,7 +426,7 @@ fi
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
 
-# --- 飞书插件入口修复 (在线重装版) ---
+# --- 飞书插件入口修复 (修正包名重装版) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 FEISHU_USER_DIR="/root/.openclaw/extensions/feishu"
 
@@ -439,21 +439,27 @@ if [ -d "$FEISHU_DIR" ] || [ ! -d "$FEISHU_USER_DIR" ]; then
     cp -r "$FEISHU_USER_DIR"/* "$FEISHU_DIR/" 2>/dev/null || true
   fi
 
-  # 2. 如果依然缺失，尝试强制 npm 安装到临时目录
+  # 2. 如果依然缺失，尝试强制 npm 安装到临时目录 (修正包名为 @openclaw/feishu)
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
-    echo "[patch] index.js still missing. Attempting emergency npm install..."
+    echo "[patch] index.js still missing. Attempting emergency npm install of @openclaw/feishu..."
     mkdir -p /tmp/feishu_install
-    # 尝试在 /tmp 目录下安装，避免污染主目录
-    npm install --no-save --prefix /tmp/feishu_install @openclaw/extension-feishu --registry=https://registry.npmmirror.com > /tmp/npm_install.log 2>&1 || true
+    npm install --no-save --prefix /tmp/feishu_install @openclaw/feishu --registry=https://registry.npmmirror.com > /tmp/npm_install.log 2>&1 || true
     
     # 检查安装结果
-    TMP_ENTRY="/tmp/feishu_install/node_modules/@openclaw/extension-feishu/index.js"
+    TMP_ENTRY="/tmp/feishu_install/node_modules/@openclaw/feishu/index.js"
     if [ -f "$TMP_ENTRY" ]; then
       echo "[patch] Successfully installed feishu via npm. Copying files..."
-      cp -r /tmp/feishu_install/node_modules/@openclaw/extension-feishu/* "$FEISHU_DIR/"
+      cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
     else
-      echo "[patch] npm install failed. Log snippet:"
-      tail -n 10 /tmp/npm_install.log || echo "No log found."
+      # 尝试寻找 index.mjs (如果是纯 ESM 包)
+      TMP_ENTRY_MJS="/tmp/feishu_install/node_modules/@openclaw/feishu/index.mjs"
+      if [ -f "$TMP_ENTRY_MJS" ]; then
+        cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
+        mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
+      else
+        echo "[patch] npm install failed. Log snippet:"
+        tail -n 10 /tmp/npm_install.log || echo "No log found."
+      fi
     fi
   fi
 
