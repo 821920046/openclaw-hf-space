@@ -426,35 +426,41 @@ fi
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
 
-# --- 飞书插件入口文件修复 (全盘搜索版) ---
+# --- 飞书插件入口缺失补救 (全盘搜寻 & 借尸还魂) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
-  echo "[patch] Deep scanning Feishu directory..."
+  echo "[patch] Entry missing in dist. Searching entire /app for feishu entry..."
   
-  # 打印元数据辅助诊断
-  if [ -f "$FEISHU_DIR/openclaw.plugin.json" ]; then
-    echo "[patch] openclaw.plugin.json content:"
-    cat "$FEISHU_DIR/openclaw.plugin.json"
-  fi
-
-  # 寻找可能的入口文件
-  ENTRY_FILE=$(find "$FEISHU_DIR" -maxdepth 2 -name "index.js" -o -name "index.mjs" -o -name "index.cjs" | head -n 1)
-  if [ -z "$ENTRY_FILE" ]; then
-    # 如果找不到 index，找任何 js 文件（排除 package.json）
-    ENTRY_FILE=$(find "$FEISHU_DIR" -maxdepth 2 -name "*.js" ! -name "package.json" | head -n 1)
-  fi
-
-  if [ -n "$ENTRY_FILE" ]; then
-    echo "[patch] Found potential entry point: $ENTRY_FILE"
-    if [ "$ENTRY_FILE" != "$FEISHU_DIR/index.js" ]; then
-      cp "$ENTRY_FILE" "$FEISHU_DIR/index.js"
-      echo "[patch] Copied $ENTRY_FILE to $FEISHU_DIR/index.js"
+  # 1. 尝试寻找真正的入口文件位置
+  REAL_ENTRY=$(find /app/openclaw/dist -name "index.js" | grep "feishu" | head -n 1)
+  
+  if [ -n "$REAL_ENTRY" ]; then
+    echo "[patch] Found feishu entry at: $REAL_ENTRY"
+    REAL_DIR=$(dirname "$REAL_ENTRY")
+    if [ "$REAL_DIR" != "$FEISHU_DIR" ]; then
+      echo "[patch] Relocating plugin files from $REAL_DIR to $FEISHU_DIR..."
+      cp -r "$REAL_DIR"/* "$FEISHU_DIR/" 2>/dev/null || true
     fi
   else
-    echo "[patch] CRITICAL: No entry file found in $FEISHU_DIR!"
+    # 2. 检查是否作为 Channel 存在但配置错误
+    if [ -d "/app/openclaw/dist/channels/feishu" ]; then
+      echo "[patch] Found feishu as a CHANNEL. Moving to extensions to force load..."
+      cp -r /app/openclaw/dist/channels/feishu/* "$FEISHU_DIR/" 2>/dev/null || true
+    fi
   fi
 
-  echo "[patch] Re-constructing package.json..."
+  # 3. 再次检查 index.js
+  if [ ! -f "$FEISHU_DIR/index.js" ]; then
+    # 尝试寻找任何可能的 js
+    ALT_JS=$(find "$FEISHU_DIR" -name "*.js" ! -name "package.json" | head -n 1)
+    if [ -n "$ALT_JS" ]; then
+      cp "$ALT_JS" "$FEISHU_DIR/index.js"
+      echo "[patch] Using $ALT_JS as index.js"
+    fi
+  fi
+
+  # 4. 最终补全
+  echo "[patch] Finalizing package.json..."
   node -e '
     const fs = require("fs");
     const p = "/app/openclaw/dist/extensions/feishu/package.json";
@@ -467,22 +473,21 @@ if [ -d "$FEISHU_DIR" ]; then
     fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
   '
 
-  # 注入 CJS 桥接
+  # 5. 桥接与权限
   if [ -f "$FEISHU_DIR/index.js" ]; then
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
       cat > /tmp/feishu-cjs.js << 'EOF'
 // OPENCLAW_CJS_BRIDGE
 if (typeof __dirname === 'undefined') { global.__dirname = '/app/openclaw/dist/extensions/feishu'; }
-if (typeof __filename === 'undefined') { global.__filename = '/app/openclaw/dist/extensions/feishu/index.js'; }
 EOF
       cat "$FEISHU_DIR/index.js" >> /tmp/feishu-cjs.js
       mv /tmp/feishu-cjs.js "$FEISHU_DIR/index.js"
-      echo "[patch] Feishu bridge injected."
     fi
+    chmod -R 777 "$FEISHU_DIR"
+    echo "[patch] Feishu plugin ready."
+  else
+    echo "[patch] ERROR: Still no index.js found for feishu."
   fi
-  
-  chmod -R 777 "$FEISHU_DIR"
-  echo "[patch] Feishu plugin patch complete."
 fi
 
 # --- 预设设备身份防止浏览器插件报错 ---
