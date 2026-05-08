@@ -385,76 +385,73 @@ if [[ -f "${OPENCLAW_CONFIG_PATH}" ]]; then
       if (!account.appSecret && feishu.appSecret) {
         account.appSecret = feishu.appSecret;
         feishuDirty = true;
-      }
       if (!account.domain && feishu.domain) {
         account.domain = feishu.domain;
         feishuDirty = true;
       }
-      if (Object.prototype.hasOwnProperty.call(feishu, "appId")) {
-        delete feishu.appId;
-        feishuDirty = true;
-      }
-      if (Object.prototype.hasOwnProperty.call(feishu, "appSecret")) {
-        delete feishu.appSecret;
-        feishuDirty = true;
-      }
-      if (feishuDirty) {
-        dirty = true;
-        console.log("Config sanitized: normalized Feishu account configuration");
-      }
     }
-
     if (dirty) {
       fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+      console.log("Config sanitized: normalized Feishu account configuration");
     }
+  ' "${OPENCLAW_CONFIG_PATH}"
+fi
 
-    const finalFeishu = cfg.channels && cfg.channels.feishu;
-    const finalAccountName = finalFeishu && (finalFeishu.defaultAccount || "main");
-    const finalAccount = finalFeishu && finalFeishu.accounts && finalAccountName
-      ? finalFeishu.accounts[finalAccountName]
-}
-
-# --- 彻底重置与配置清理 ---
+# --- 彻底重置与配置清理 (响应用户要求) ---
 if [[ -n "${FEISHU_APP_ID}" && -n "${FEISHU_APP_SECRET}" ]]; then
-  echo "[nuclear-reset] Feishu credentials detected. Performing a clean reset of OpenClaw state..."
+  echo "[nuclear-reset] Feishu credentials detected. Purging old state..."
   rm -rf "${OPENCLAW_HOME}/openclaw.json"* 2>/dev/null || true
   rm -rf "${OPENCLAW_HOME}/gateway.db"* 2>/dev/null || true
   rm -rf "${OPENCLAW_HOME}/.config-"* 2>/dev/null || true
   rm -rf "${OPENCLAW_STATE_DIR}/gateway" 2>/dev/null || true
   find "${OPENCLAW_STATE_DIR}" -name "config-meta*" -delete 2>/dev/null || true
-  echo "[nuclear-reset] All old config and state purged. Starting from scratch."
+  echo "[nuclear-reset] Clean reset done."
 fi
 
-# 在重置后重新生成配置
-render_openclaw_config
+# --- 重新生成基础配置 ---
+if [[ ! -f "${OPENCLAW_CONFIG_PATH}" ]]; then
+  echo "[config] Generating fresh config from template..."
+  template_path="/app/docker/openclaw.template.json"
+  config_template="$(cat "${template_path}")"
+  config_template="${config_template//\$\{SPACE_HOST\}/${SPACE_HOST}}"
+  config_template="${config_template//\$\{OPENCLAW_DEFAULT_MODEL\}/${OPENCLAW_DEFAULT_MODEL}}"
+  config_template="${config_template//\$\{DASHSCOPE_API_KEY\}/${DASHSCOPE_API_KEY:-}}"
+  config_template="${config_template//\$\{SILICONFLOW_API_KEY\}/${SILICONFLOW_API_KEY:-}}"
+  config_template="${config_template//\$\{FEISHU_ENABLED\}/${FEISHU_ENABLED}}"
+  config_template="${config_template//\$\{FEISHU_APP_ID\}/${FEISHU_APP_ID}}"
+  config_template="${config_template//\$\{FEISHU_APP_SECRET\}/${FEISHU_APP_SECRET}}"
+  config_template="${config_template//\$\{FEISHU_DOMAIN\}/${FEISHU_DOMAIN}}"
+  config_template="${config_template//\$\{FEISHU_DM_POLICY\}/${FEISHU_DM_POLICY}}"
+  config_template="${config_template//\$\{FEISHU_ALLOW_FROM_JSON\}/${FEISHU_ALLOW_FROM_JSON}}"
+  config_template="${config_template//\$\{BROWSER_CONTROL_TOKEN\}/${BROWSER_CONTROL_TOKEN}}"
 
-# --- 飞书插件入口修复 (修正包名 & 强制重装) ---
+  echo "${config_template}" > "${OPENCLAW_CONFIG_PATH}"
+fi
+
+# --- 飞书插件物理修复 ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
-    echo "[patch] index.js missing in dist. Attempting emergency npm install of @openclaw/feishu..."
+    echo "[patch] index.js missing. Emergency npm install @openclaw/feishu..."
     mkdir -p /tmp/feishu_install
     npm install --no-save --prefix /tmp/feishu_install @openclaw/feishu --registry=https://registry.npmmirror.com > /tmp/npm_install.log 2>&1 || true
     
     TMP_SRC="/tmp/feishu_install/node_modules/@openclaw/feishu"
     if [ -f "$TMP_SRC/index.js" ] || [ -f "$TMP_SRC/index.mjs" ]; then
-      echo "[patch] Successfully installed feishu via npm. Copying to extensions..."
+      echo "[patch] Successfully installed feishu via npm."
       cp -r $TMP_SRC/* "$FEISHU_DIR/"
-      if [ -f "$FEISHU_DIR/index.mjs" ] && [ ! -f "$FEISHU_DIR/index.js" ]; then
-        mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
-      fi
+      [ -f "$FEISHU_DIR/index.mjs" ] && [ ! -f "$FEISHU_DIR/index.js" ] && mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
     else
-      echo "[patch] npm install failed. FULL LOG:"
+      echo "[patch] npm install failed. ERROR LOG:"
       cat /tmp/npm_install.log
     fi
   fi
 
   if [ -f "$FEISHU_DIR/index.js" ]; then
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
-      echo "// OPENCLAW_CJS_BRIDGE" > /tmp/feishu-cjs.js
-      echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; }" >> /tmp/feishu-cjs.js
-      cat "$FEISHU_DIR/index.js" >> /tmp/feishu-cjs.js
-      mv /tmp/feishu-cjs.js "$FEISHU_DIR/index.js"
+      echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; } // OPENCLAW_CJS_BRIDGE" > /tmp/bridge.js
+      cat "$FEISHU_DIR/index.js" >> /tmp/bridge.js
+      mv /tmp/bridge.js "$FEISHU_DIR/index.js"
     fi
     chmod -R 755 "$FEISHU_DIR"
     echo "[patch] Feishu plugin patched."
