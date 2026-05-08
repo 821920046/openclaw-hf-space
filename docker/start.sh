@@ -81,51 +81,42 @@ node -e '
   fs.writeFileSync(process.env.OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2));
 ' "${template_path}"
 
-# --- 5. 飞书插件物理修复 (增强版 Tarball 注入) ---
+# --- 5. 飞书插件物理修复 & 兼容性手术 ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
-  echo "[patch] Checking feishu runtime in $FEISHU_DIR..."
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
-    echo "[patch] Feishu index.js missing. Downloading Tarball..."
+    echo "[patch] Downloading Tarball..."
     mkdir -p /tmp/feishu_tar
     TAR_URL=$(curl -s https://registry.npmmirror.com/@openclaw/feishu/latest | node -e '
       const input = require("fs").readFileSync(0, "utf8");
       try { console.log(JSON.parse(input).dist.tarball); } catch(e) { process.exit(1); }
     ')
-    
     if [[ -n "${TAR_URL}" ]]; then
       curl -L "${TAR_URL}" -o /tmp/feishu.tgz
       tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
-      
-      # 寻找真正的入口点
-      echo "[patch] Extraction done. Searching for entry point..."
-      find /tmp/feishu_tar -maxdepth 3 -type f
-      
-      # 物理移动：优先 package 目录
-      if [ -d "/tmp/feishu_tar/package" ]; then
+      if [ -d "/tmp/feishu_tar/package/dist" ]; then
         cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/"
-      else
-        cp -r /tmp/feishu_tar/* "$FEISHU_DIR/" 2>/dev/null || true
-      fi
-      
-      # 寻找 index.js
-      REAL_ENTRY=$(find "$FEISHU_DIR" -name "index.js" | head -n 1)
-      if [ -z "$REAL_ENTRY" ]; then
-        REAL_ENTRY=$(find "$FEISHU_DIR" -name "index.mjs" | head -n 1)
-        if [ -n "$REAL_ENTRY" ]; then mv "$REAL_ENTRY" "$FEISHU_DIR/index.js"; REAL_ENTRY="$FEISHU_DIR/index.js"; fi
-      fi
-      
-      if [ -f "$REAL_ENTRY" ]; then
-        echo "[patch] Found entry at $REAL_ENTRY. Applying CJS bridge..."
-        echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; } // BRIDGE" > /tmp/b.js
-        cat "$REAL_ENTRY" >> /tmp/b.js
-        mv /tmp/b.js "$REAL_ENTRY"
-        chmod -R 755 "$FEISHU_DIR"
-        echo "[patch] Feishu plugin restored successfully."
-      else
-        echo "[patch] ERROR: No index.js or index.mjs found after extraction."
+        mv "$FEISHU_DIR/dist/index.js" "$FEISHU_DIR/index.js" 2>/dev/null || true
       fi
     fi
+  fi
+
+  # 执行兼容性手术：修复 missing export 报错
+  if [ -f "$FEISHU_DIR/index.js" ]; then
+    echo "[patch] Applying compatibility surgery for v2026.5.3-1..."
+    
+    # 定义 Mock 函数并注入到 index.js 头部
+    # 针对报错：formatChannelProgressDraftLineForEntry
+    sed -i "1i var formatChannelProgressDraftLineForEntry = (v) => v;" "$FEISHU_DIR/index.js"
+    
+    # 注入 CJS 桥接
+    if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
+      echo "if (typeof __dirname === 'undefined') { global.__dirname = '$FEISHU_DIR'; } // OPENCLAW_CJS_BRIDGE" > /tmp/b.js
+      cat "$FEISHU_DIR/index.js" >> /tmp/b.js
+      mv /tmp/b.js "$FEISHU_DIR/index.js"
+    fi
+    chmod -R 755 "$FEISHU_DIR"
+    echo "[patch] Feishu plugin patched and compat-fixed."
   fi
 fi
 
