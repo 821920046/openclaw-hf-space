@@ -423,47 +423,46 @@ if [[ -f "${OPENCLAW_CONFIG_PATH}" ]]; then
   ' "${OPENCLAW_CONFIG_PATH}"
 fi
 
-rm -f /etc/nginx/.htpasswd
-htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
+# --- 彻底重置与配置清理 (响应用户重新配置需求) ---
+if [[ -n "${FEISHU_APP_ID}" && -n "${FEISHU_APP_SECRET}" ]]; then
+  echo "[nuclear-reset] Feishu credentials detected. Performing a clean reset of OpenClaw state..."
+  # 删除旧配置、备份和数据库快照，确保没有“last-good”干扰
+  rm -rf "${OPENCLAW_HOME}/openclaw.json"* 2>/dev/null || true
+  rm -rf "${OPENCLAW_HOME}/gateway.db"* 2>/dev/null || true
+  rm -rf "${OPENCLAW_HOME}/.config-"* 2>/dev/null || true
+  rm -rf "${OPENCLAW_STATE_DIR}/gateway" 2>/dev/null || true
+  find "${OPENCLAW_STATE_DIR}" -name "config-meta*" -delete 2>/dev/null || true
+  echo "[nuclear-reset] All old config and state purged. Starting from scratch."
+fi
 
-# --- 飞书插件入口修复 (修正包名重装版) ---
+# --- 飞书插件入口修复 (修正包名 & 强制重装) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
-FEISHU_USER_DIR="/root/.openclaw/extensions/feishu"
-
-if [ -d "$FEISHU_DIR" ] || [ ! -d "$FEISHU_USER_DIR" ]; then
-  echo "[patch] Checking feishu entry points..."
-  
-  # 1. 优先检查用户数据目录 (Dataset 还原回来的插件)
-  if [ ! -f "$FEISHU_DIR/index.js" ] && [ -f "$FEISHU_USER_DIR/index.js" ]; then
-    echo "[patch] Found feishu in user state. Syncing to dist..."
-    cp -r "$FEISHU_USER_DIR"/* "$FEISHU_DIR/" 2>/dev/null || true
-  fi
-
-  # 2. 如果依然缺失，尝试强制 npm 安装到临时目录 (修正包名为 @openclaw/feishu)
+if [ -d "$FEISHU_DIR" ]; then
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
-    echo "[patch] index.js still missing. Attempting emergency npm install of @openclaw/feishu..."
+    echo "[patch] index.js missing in dist. Attempting emergency npm install of @openclaw/feishu..."
     mkdir -p /tmp/feishu_install
+    # 使用正确的包名 @openclaw/feishu
     npm install --no-save --prefix /tmp/feishu_install @openclaw/feishu --registry=https://registry.npmmirror.com > /tmp/npm_install.log 2>&1 || true
     
     # 检查安装结果
     TMP_ENTRY="/tmp/feishu_install/node_modules/@openclaw/feishu/index.js"
     if [ -f "$TMP_ENTRY" ]; then
-      echo "[patch] Successfully installed feishu via npm. Copying files..."
+      echo "[patch] Successfully installed feishu via npm. Copying to extensions..."
       cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
     else
-      # 尝试寻找 index.mjs (如果是纯 ESM 包)
+      # 兼容 ESM 路径
       TMP_ENTRY_MJS="/tmp/feishu_install/node_modules/@openclaw/feishu/index.mjs"
       if [ -f "$TMP_ENTRY_MJS" ]; then
         cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
         mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
       else
-        echo "[patch] npm install failed. Log snippet:"
-        tail -n 10 /tmp/npm_install.log || echo "No log found."
+        echo "[patch] npm install failed. Showing last 5 lines of log:"
+        tail -n 5 /tmp/npm_install.log
       fi
     fi
   fi
 
-  # 3. 再次检查 index.js 并实施桥接
+  # 注入桥接逻辑
   if [ -f "$FEISHU_DIR/index.js" ]; then
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
       echo "// OPENCLAW_CJS_BRIDGE" > /tmp/feishu-cjs.js
@@ -472,11 +471,17 @@ if [ -d "$FEISHU_DIR" ] || [ ! -d "$FEISHU_USER_DIR" ]; then
       mv /tmp/feishu-cjs.js "$FEISHU_DIR/index.js"
     fi
     chmod -R 755 "$FEISHU_DIR"
-    echo "[patch] Feishu plugin patched and ready."
-  else
-    echo "[patch] ERROR: All attempts to find or install feishu failed."
+    echo "[patch] Feishu plugin patched."
   fi
 fi
+
+# --- 增强配置生成 ---
+# 强制渲染模板，不跳过任何步骤
+render_config_template
+echo "Config written to ${OPENCLAW_CONFIG_PATH} (forced rewrite)"
+
+rm -f /etc/nginx/.htpasswd
+htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
 
 # --- 预设设备身份防止浏览器插件报错 ---
 # 修复日志中的 "device identity required" 错误
