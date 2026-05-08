@@ -412,21 +412,11 @@ if [[ -f "${OPENCLAW_CONFIG_PATH}" ]]; then
     const finalAccountName = finalFeishu && (finalFeishu.defaultAccount || "main");
     const finalAccount = finalFeishu && finalFeishu.accounts && finalAccountName
       ? finalFeishu.accounts[finalAccountName]
-      : undefined;
-    const appId = finalAccount && typeof finalAccount.appId === "string" ? finalAccount.appId : "";
-    const appIdSafe = appId ? `${appId.slice(0, 8)}...${appId.slice(-4)}` : "missing";
-    const allowFrom = finalFeishu && Array.isArray(finalFeishu.allowFrom) ? finalFeishu.allowFrom : [];
-    console.log(`Feishu config actual: present=${Boolean(finalFeishu)} enabled=${finalFeishu ? finalFeishu.enabled !== false : false} account=${finalAccountName || "none"} appId=${appIdSafe} appSecret=${finalAccount && finalAccount.appSecret ? "set" : "missing"} domain=${finalFeishu ? finalFeishu.domain || "feishu" : "n/a"} dmPolicy=${finalFeishu ? finalFeishu.dmPolicy || "pairing" : "n/a"} allowFromCount=${allowFrom.length}`);
-    if (process.env.FEISHU_ENABLED === "true" && (!finalFeishu || finalFeishu.enabled === false || !finalAccount || !finalAccount.appId || !finalAccount.appSecret)) {
-      console.error("Config warning: FEISHU_APP_ID/FEISHU_APP_SECRET are set, but runtime channels.feishu is incomplete.");
-    }
-  ' "${OPENCLAW_CONFIG_PATH}"
-fi
+}
 
-# --- 彻底重置与配置清理 (响应用户重新配置需求) ---
+# --- 彻底重置与配置清理 ---
 if [[ -n "${FEISHU_APP_ID}" && -n "${FEISHU_APP_SECRET}" ]]; then
   echo "[nuclear-reset] Feishu credentials detected. Performing a clean reset of OpenClaw state..."
-  # 删除旧配置、备份和数据库快照，确保没有“last-good”干扰
   rm -rf "${OPENCLAW_HOME}/openclaw.json"* 2>/dev/null || true
   rm -rf "${OPENCLAW_HOME}/gateway.db"* 2>/dev/null || true
   rm -rf "${OPENCLAW_HOME}/.config-"* 2>/dev/null || true
@@ -435,34 +425,30 @@ if [[ -n "${FEISHU_APP_ID}" && -n "${FEISHU_APP_SECRET}" ]]; then
   echo "[nuclear-reset] All old config and state purged. Starting from scratch."
 fi
 
+# 在重置后重新生成配置
+render_openclaw_config
+
 # --- 飞书插件入口修复 (修正包名 & 强制重装) ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ]; then
   if [ ! -f "$FEISHU_DIR/index.js" ]; then
     echo "[patch] index.js missing in dist. Attempting emergency npm install of @openclaw/feishu..."
     mkdir -p /tmp/feishu_install
-    # 使用正确的包名 @openclaw/feishu
     npm install --no-save --prefix /tmp/feishu_install @openclaw/feishu --registry=https://registry.npmmirror.com > /tmp/npm_install.log 2>&1 || true
     
-    # 检查安装结果
-    TMP_ENTRY="/tmp/feishu_install/node_modules/@openclaw/feishu/index.js"
-    if [ -f "$TMP_ENTRY" ]; then
+    TMP_SRC="/tmp/feishu_install/node_modules/@openclaw/feishu"
+    if [ -f "$TMP_SRC/index.js" ] || [ -f "$TMP_SRC/index.mjs" ]; then
       echo "[patch] Successfully installed feishu via npm. Copying to extensions..."
-      cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
-    else
-      # 兼容 ESM 路径
-      TMP_ENTRY_MJS="/tmp/feishu_install/node_modules/@openclaw/feishu/index.mjs"
-      if [ -f "$TMP_ENTRY_MJS" ]; then
-        cp -r /tmp/feishu_install/node_modules/@openclaw/feishu/* "$FEISHU_DIR/"
+      cp -r $TMP_SRC/* "$FEISHU_DIR/"
+      if [ -f "$FEISHU_DIR/index.mjs" ] && [ ! -f "$FEISHU_DIR/index.js" ]; then
         mv "$FEISHU_DIR/index.mjs" "$FEISHU_DIR/index.js"
-      else
-        echo "[patch] npm install failed. Showing last 5 lines of log:"
-        tail -n 5 /tmp/npm_install.log
       fi
+    else
+      echo "[patch] npm install failed. FULL LOG:"
+      cat /tmp/npm_install.log
     fi
   fi
 
-  # 注入桥接逻辑
   if [ -f "$FEISHU_DIR/index.js" ]; then
     if ! grep -q "OPENCLAW_CJS_BRIDGE" "$FEISHU_DIR/index.js"; then
       echo "// OPENCLAW_CJS_BRIDGE" > /tmp/feishu-cjs.js
@@ -474,11 +460,6 @@ if [ -d "$FEISHU_DIR" ]; then
     echo "[patch] Feishu plugin patched."
   fi
 fi
-
-# --- 增强配置生成 ---
-# 强制渲染模板，不跳过任何步骤
-render_config_template
-echo "Config written to ${OPENCLAW_CONFIG_PATH} (forced rewrite)"
 
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER}" "${BASIC_AUTH_PASSWORD}"
