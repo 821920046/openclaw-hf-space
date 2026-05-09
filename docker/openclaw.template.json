@@ -33,11 +33,14 @@
     },
     "email": {
       "enabled": ${EMAIL_ENABLED},
-      "defaultAccount": "main",
+      "allowFrom": ["*"],
+      "replyMode": "complete",
+      "replyTo": "sender",
       "accounts": {
-        "main": {
+        "default": {
           "email": "${EMAIL_ACCOUNT}",
-          "token": "${EMAIL_TOKEN}"
+          "password": "${EMAIL_TOKEN}",
+          "transport": "${EMAIL_MODE}"
         }
       }
     }

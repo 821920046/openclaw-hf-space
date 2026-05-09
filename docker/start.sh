@@ -306,11 +306,14 @@ node -e '
     cfg.channels = cfg.channels || {};
     cfg.channels.email = {
       enabled: true,
-      defaultAccount: "main",
+      allowFrom: ["*"],
+      replyMode: "complete",
+      replyTo: "sender",
       accounts: {
-        main: {
+        "default": {
           email: process.env.EMAIL_ACCOUNT,
-          token: process.env.EMAIL_TOKEN
+          password: process.env.EMAIL_TOKEN,
+          transport: getEnv("EMAIL_MODE", "imap")
         }
       }
     };
