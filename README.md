@@ -59,11 +59,14 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
 - `FEISHU_DOMAIN`
   - 默认为 `feishu`
 - `FEISHU_DM_POLICY`
-  - 可选。若未设置，当 `FEISHU_ALLOW_FROM` 已设置时启动脚本会自动使用 `allowlist`，否则回退到 `pairing`。
+  - 可选，通常无需手动设置。启动脚本会自动推断：
+    - 有 `FEISHU_ALLOW_FROM` → 自动使用 `allowlist`（推荐）
+    - 无 `FEISHU_ALLOW_FROM` → 自动回退到 `open`（任何飞书用户可私聊）
+    - 手动设置时，尊重用户选择
 - `FEISHU_ALLOW_FROM`
   - 逗号分隔的飞书 open_id 白名单。例如：`ou_abc123,ou_def456`
 - `OPENCLAW_RESET_STATE_ON_BOOT`
-  - 默认为 `0`。仅当你希望每次启动都清空运行时状态时才设置为 `1`。
+  - 默认为 `0`。设置为 `1` 时，每次启动会清除 gateway.db 和运行时状态（之前的"核弹重置"）。通常保持 `0`，仅在排查飞书插件状态损坏时临时开启。
 - `OPENCLAW_REWRITE_CONFIG_ON_BOOT`
   - 默认为 `0`。如果你希望启动时的 secrets 每次都覆盖现有的配置文件，请设置为 `1`。
 - `OPENCLAW_CONFIG_JSON_B64`
@@ -93,8 +96,10 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
    - `FEISHU_APP_ID=<你的应用ID>`
    - `FEISHU_APP_SECRET=<你的应用密钥>`
    - `FEISHU_DOMAIN=feishu`
-   - `FEISHU_ALLOW_FROM=<你的open_id>`
-4. （可选）显式设置 `FEISHU_DM_POLICY=allowlist`。如果省略，当 `FEISHU_ALLOW_FROM` 存在时，模板会自动切换到 `allowlist`。
+   - `FEISHU_ALLOW_FROM=<你的open_id>`（强烈建议，否则每次重启需要重新配对）
+4. `FEISHU_DM_POLICY` 无需手动设置。启动脚本会自动推断：
+   - 有 `FEISHU_ALLOW_FROM` → 自动使用 `allowlist`（推荐）
+   - 无 `FEISHU_ALLOW_FROM` → 自动回退到 `open`（任何飞书用户都可私聊，安全性较低）
 5. 设置 `OPENCLAW_DEFAULT_MODEL=openrouter/free`，除非你已确认供应商账号支持其他模型 ID。
 6. 重新构建或重启 Space。
 7. 启动后，确认日志包含：
@@ -172,10 +177,9 @@ Space 根路径 `/` 保留用于 Hugging Face 健康检查，应返回纯文本 
   - `FEISHU_APP_ID`
   - `FEISHU_APP_SECRET`
   - `FEISHU_DOMAIN=feishu`
-  - `FEISHU_DM_POLICY=allowlist`
-  - `FEISHU_ALLOW_FROM=ou_89367e9cb5938513d24cac7bb3c0c5a7`
+  - `FEISHU_ALLOW_FROM=<你的open_id>`（设置后 dmPolicy 自动切为 allowlist）
 - **推荐的行为标志**
-  - `OPENCLAW_RESET_STATE_ON_BOOT=0`
+  - `OPENCLAW_RESET_STATE_ON_BOOT=0`（保持 `0` 以保留配对和运行时状态）
   - `OPENCLAW_REWRITE_CONFIG_ON_BOOT=0`
   - `OPENCLAW_DEFAULT_MODEL=openrouter/free`
 - **免费版持久化建议**
@@ -223,6 +227,7 @@ docker run --rm -p 7860:7860 \
 - `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板
 - `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化逻辑
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
+- `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡与 OpenRouter 代理故障转移
 
 ## 上游版本策略
@@ -258,23 +263,119 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 
 ## 故障排除
 
-- `git clone` 期间构建失败
-  - 检查构建环境是否可以访问 GitHub。
-- 选择标签时构建失败
+### 构建阶段
+
+- **`git clone` 期间构建失败**
+  - 检查构建环境是否可以访问 GitHub。Hugging Face 构建服务器通常可以访问，但偶尔会出现网络波动。
+  - 如果反复失败，尝试在 `Dockerfile` 中将 `OPENCLAW_REPO` 换为镜像地址。
+
+- **选择标签时构建失败**
   - OpenClaw 可能更改了标签命名规则，或者仓库暂时没有可抓取的标签。
-- `pnpm install` 或 `pnpm build` 期间构建失败
+  - 解决方案：在 `Dockerfile` 中固定到一个已知可用的标签（如 `ARG OPENCLAW_REF="v2026.5.3-1"`），不要使用 `stable`。
+
+- **`pnpm install` 或 `pnpm build` 期间构建失败**
   - OpenClaw 可能更改了工作区或构建脚本；如有需要，请回退到已知的正常版本。
-- 应用返回 `502 Bad Gateway`
+  - 常见原因：pnpm 的 `minimumReleaseAge` 策略拒绝了太新的包版本，或新依赖引入了原生编译需求。
+  - 解决方案：回退 `OPENCLAW_REF` 到上一个成功构建的版本。
+
+### 启动阶段
+
+- **容器启动后立即退出（Exit code: 1）**
+  - 查看 HF Space 的 "Container logs" 标签页，找到第一条错误信息。
+  - 常见原因：
+    - `set -euo pipefail` 下某个命令返回了非零退出码（如 `grep` 未找到匹配项）。
+    - 从 HF 状态仓库恢复的 `openclaw.json` 与新版本模板不兼容。
+  - 解决方案：确保使用最新版本的 `start.sh`，其中已对所有可能失败的命令加了 `|| true` 保护。
+
+- **启动日志停在 `[patch]` 之后无后续输出**
+  - 这通常是 SDK 补丁脚本中的 `grep -rl | head` 管道在 `set -o pipefail` 下崩溃。
+  - 解决方案：更新到最新版本的 `start.sh`，该问题已在管道命令后添加 `|| true` 修复。
+
+- **`Config observe anomaly` 或 `Config overwrite` 日志**
+  - 这是 OpenClaw 网关检测到配置文件变更后的正常日志，不是错误。
+  - 如果每次启动都出现，说明启动脚本正在从模板重新生成配置，这是预期行为。
+
+- **`connect() failed (111: Connection refused) while connecting to upstream`**
+  - Nginx 尝试代理请求到后端服务，但对应端口没有进程在监听。
+  - 常见场景：
+    - `/api/backup` 路由指向 `127.0.0.1:18790`，但 `backup_api.py` 未启动。
+    - `/openclaw/` 路由指向 `127.0.0.1:18789`，但 OpenClaw 网关尚未完全就绪（启动初期几秒内属正常）。
+  - 解决方案：确保使用最新版本的 `start.sh`，其中已包含所有服务的启动命令。
+
+### 控制台 UI
+
+- **应用返回 `502 Bad Gateway`**
   - OpenClaw 可能在 Nginx 能够代理之前就退出了。检查 Space 运行时日志中的 Node 进程。
-- UI 加载但无法连接
+  - 如果网关已启动但仍 502，检查 Nginx 配置中的端口是否与网关实际监听端口一致。
+
+- **UI 加载但无法连接**
   - 确认浏览器使用的是 `https://<space>.hf.space/openclaw/`。
   - 如果看到手动的 WebSocket/Token 连接表单，说明你访问了错误的页面，或者旧的部署仍在运行之前的 UI。
-- 连接后发送消息失败
+
+- **连接后发送消息失败**
   - 核实 `OPENROUTER_API_KEY` 是否有效且具有模型访问权限。
-- 飞书私聊不断提示配对，或重启后配对批准消失
-  - 设置 `FEISHU_ALLOW_FROM=<你的open_id>`。本模板将自动切换为 `allowlist` 模式，或者你也可以显式设置 `FEISHU_DM_POLICY=allowlist`。
-- 重启后运行时状态消失
+  - 检查日志中是否有 `401 Unauthorized` 或 `429 Rate Limited` 等供应商错误。
+
+### 飞书集成
+
+- **飞书频道报错：`does not provide an export named 'formatChannelProgressDraftLineForEntry'`**
+  - 这是 OpenClaw SDK 的已知版本兼容问题。飞书插件依赖 `formatChannelProgressDraftLineForEntry` 导出，但某些 OpenClaw 版本的 `plugin-sdk/channel-streaming` 模块缺少该导出。
+  - 启动脚本会自动通过 Node.js 模块解析找到正确的文件并注入缺失的导出。
+  - 如果仍然报错，检查启动日志中 `[patch]` 部分的输出：
+    - 如果看到 `Resolved to: ...` 和 `Successfully patched`，说明补丁已应用但可能目标文件不对。
+    - 如果看到 `ERROR: Could not resolve`，说明找不到目标文件。日志会打印 `dist/` 目录结构帮助诊断。
+  - 临时解决方案：在 `OPENCLAW_RESET_STATE_ON_BOOT=1` 下重启，让脚本重新执行补丁。
+
+- **飞书频道反复 `auto-restart attempt N/10`**
+  - 这是飞书频道启动失败后的自动重试机制。需要先解决导致失败的根本原因（通常是上面的 export 缺失问题）。
+  - 重试 10 次后会永久停止。重启 Space 可以重置重试计数器。
+
+- **飞书私聊不断提示配对，或重启后配对批准消失**
+  - 设置 `FEISHU_ALLOW_FROM=<你的open_id>`。启动脚本会自动将 dmPolicy 切换为 `allowlist`，绕过配对机制。
+  - 如果暂时找不到 open_id，可不设置 `FEISHU_ALLOW_FROM`，脚本会自动回退到 `open` 模式（任何用户可私聊）。
+  - 根本原因：之前的版本会在每次启动时强制清除 `gateway.db`（"核弹重置"），导致配对状态永远丢失。此行为已改为可选，默认关闭。
+
+- **飞书机器人不回复消息（频道显示已连接）**
+  - 检查 `OPENROUTER_API_KEY` 或其他模型供应商密钥是否有效。
+  - 检查日志中是否有模型调用的错误（如 `model not found`、`quota exceeded`）。
+  - 确认 `OPENCLAW_DEFAULT_MODEL` 设置的模型在你的供应商账号中可用。
+
+- **如何查找飞书 open_id**
+  - 临时给机器人发送一条私聊，查看启动日志中的类似行：
+    ```text
+    [feishu] feishu[default]: received message from ou_xxx... in oc_xxx... (p2p)
+    ```
+  - `ou_xxx...` 的值就是你的 `open_id`。将其填入 `FEISHU_ALLOW_FROM` 即可。
+
+- **飞书插件下载失败：`Could not fetch feishu tarball URL`**
+  - 启动脚本在找不到飞书插件的 `index.js` 时，会尝试从 npmmirror.com 下载。
+  - 如果 HF 构建环境无法访问 npmmirror，会打印警告但不会阻止启动（网关仍会启动，只是飞书不可用）。
+  - 解决方案：确保使用包含飞书插件的 OpenClaw 版本，或在构建时预装插件。
+
+### 状态持久化
+
+- **重启后运行时状态消失**
   - 配置 `HF_TOKEN` 和 `OPENCLAW_HF_STATE_REPO`，以便模板将 `~/.openclaw` 备份到私有的 Hugging Face 数据集仓库，并在下次启动时恢复。
+
+- **状态恢复后配置被旧数据覆盖**
+  - 从 HF 状态仓库恢复的 `openclaw.json` 可能包含旧版本的配置，与新模板冲突。
+  - 启动脚本现在会在每次启动时清除旧的 `openclaw.json` 并从模板重新生成，同时保留 `gateway.db`（配对状态）。
+  - 如果需要强制覆盖恢复出的配置，设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1`。
+
+- **状态仓库体积膨胀**
+  - 随着时间推移，HF Dataset 仓库可能因历史提交积累变得很大。
+  - 解决方案：参见 [HF_STATE_CLEANUP_GUIDE.zh-CN.md](HF_STATE_CLEANUP_GUIDE.zh-CN.md) 了解如何清理和重建状态仓库。
+
+### 其他
+
+- **Nginx 日志中出现 `open() failed` 错误**
+  - 通常是 Nginx 尝试写入 PID 文件或访问日志时目录不存在。
+  - 启动脚本已包含 `mkdir -p /var/log/nginx /var/lib/nginx /run/nginx`，如果仍报错，检查容器内目录权限。
+
+- **Space 显示 "Sleeping" 且无法唤醒**
+  - HF 免费版 Space 在无活动一段时间后会自动休眠。
+  - 访问 Space URL 即可唤醒，首次唤醒可能需要 1-2 分钟。
+  - 如果长时间无法唤醒，检查 HF 状态页面是否有平台级故障。
 
 ## 预期局限性
 
