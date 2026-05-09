@@ -47,6 +47,20 @@ if [[ "${FEISHU_ENABLED}" == "true" ]]; then
   fi
 fi
 
+# --- 3d. 邮件渠道变量解析 ---
+export EMAIL_ACCOUNT="${EMAIL_ACCOUNT:-}"
+export EMAIL_TOKEN="${EMAIL_TOKEN:-}"
+export EMAIL_MODE="${EMAIL_MODE:-imap}"
+export EMAIL_ENABLED=$([[ -n "${EMAIL_ACCOUNT}" ]] && echo "true" || echo "false")
+
+if [[ "${EMAIL_ENABLED}" == "true" ]]; then
+  echo "[email] Email channel: ENABLED"
+  echo "[email] Account: ${EMAIL_ACCOUNT}"
+  echo "[email] Connection mode: ${EMAIL_MODE}"
+else
+  echo "[email] Email channel: DISABLED (set EMAIL_ACCOUNT to enable)"
+fi
+
 # --- 3c. 清理旧配置，保护配对状态 ---
 # 从 HF 状态仓库恢复的 openclaw.json 可能包含旧版配置，与新模板冲突。
 # 必须在配置生成（第 5 步）之前清除，让模板重新生成。
@@ -259,7 +273,11 @@ node -e '
     .replace(/\$\{FEISHU_ALLOW_FROM_JSON\}/g, getEnv("FEISHU_ALLOW_FROM_JSON", "[]"))
     .replace(/\$\{BROWSER_CONTROL_TOKEN\}/g, getEnv("BROWSER_CONTROL_TOKEN"))
     .replace(/\$\{DASHSCOPE_API_KEY\}/g, getEnv("DASHSCOPE_API_KEY"))
-    .replace(/\$\{SILICONFLOW_API_KEY\}/g, getEnv("SILICONFLOW_API_KEY"));
+    .replace(/\$\{SILICONFLOW_API_KEY\}/g, getEnv("SILICONFLOW_API_KEY"))
+    .replace(/\$\{EMAIL_ENABLED\}/g, getEnv("EMAIL_ENABLED"))
+    .replace(/\$\{EMAIL_ACCOUNT\}/g, getEnv("EMAIL_ACCOUNT"))
+    .replace(/\$\{EMAIL_TOKEN\}/g, getEnv("EMAIL_TOKEN"))
+    .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"));
   let cfg = JSON.parse(cfgRaw);
   if (process.env.OPENROUTER_API_KEYS) {
     if (!cfg.models) cfg.models = { mode: "merge", providers: {} };
@@ -281,6 +299,21 @@ node -e '
       allowFrom: JSON.parse(getEnv("FEISHU_ALLOW_FROM_JSON", "[]")),
       accounts: {
         main: { appId: process.env.FEISHU_APP_ID, appSecret: process.env.FEISHU_APP_SECRET, domain: getEnv("FEISHU_DOMAIN", "feishu") }
+      }
+    };
+  }
+  if (process.env.EMAIL_ENABLED === "true") {
+    cfg.channels = cfg.channels || {};
+    cfg.channels.email = {
+      enabled: true,
+      defaultAccount: "main",
+      connectionMode: getEnv("EMAIL_MODE", "imap"),
+      accounts: {
+        main: {
+          email: process.env.EMAIL_ACCOUNT,
+          token: process.env.EMAIL_TOKEN,
+          mode: getEnv("EMAIL_MODE", "imap")
+        }
       }
     };
   }
@@ -309,6 +342,28 @@ if [ -f "$REAL_ENTRY" ]; then
     cat "$REAL_ENTRY" >> /tmp/b.js && mv /tmp/b.js "$REAL_ENTRY"
   fi
   chmod -R 755 "$FEISHU_DIR"
+fi
+
+# --- 6b. 邮件插件补全 ---
+EMAIL_DIR="/app/openclaw/dist/extensions/email"
+if [[ "${EMAIL_ENABLED}" == "true" ]]; then
+  if [ ! -d "$EMAIL_DIR" ] || [[ ! -f "$EMAIL_DIR/index.js" && ! -f "$EMAIL_DIR/dist/index.js" ]]; then
+    echo "[patch] Email plugin not found, installing @clawemail/email..."
+    mkdir -p "$EMAIL_DIR"
+    # 从 npm 下载插件包
+    npm pack @clawemail/email --pack-destination /tmp 2>/dev/null
+    EMAIL_TAR=$(ls /tmp/clawemail-email-*.tgz 2>/dev/null | head -n 1 || true)
+    if [[ -n "${EMAIL_TAR}" ]]; then
+      tar -xzf "${EMAIL_TAR}" -C /tmp/email_plugin 2>/dev/null && \
+        cp -r /tmp/email_plugin/package/* "$EMAIL_DIR/" 2>/dev/null || true
+      rm -rf /tmp/email_plugin /tmp/clawemail-email-*.tgz 2>/dev/null || true
+      echo "[patch] Email plugin installed to: $EMAIL_DIR"
+    else
+      echo "[patch] WARNING: Failed to download @clawemail/email. Email channel may not work."
+    fi
+  else
+    echo "[patch] Email plugin already present at: $EMAIL_DIR"
+  fi
 fi
 
 # --- 7. 启动进程 ---

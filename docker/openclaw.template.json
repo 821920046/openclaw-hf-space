@@ -30,6 +30,18 @@
           "domain": "${FEISHU_DOMAIN}"
         }
       }
+    },
+    "email": {
+      "enabled": ${EMAIL_ENABLED},
+      "defaultAccount": "main",
+      "connectionMode": "${EMAIL_MODE}",
+      "accounts": {
+        "main": {
+          "email": "${EMAIL_ACCOUNT}",
+          "token": "${EMAIL_TOKEN}",
+          "mode": "${EMAIL_MODE}"
+        }
+      }
     }
   },
   "models": {

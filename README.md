@@ -85,6 +85,12 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
   - 默认为 `1`，确保自动创建的仓库是私有的。
 - `HF_TOKEN`
   - 如果启用了 `OPENCLAW_HF_STATE_REPO` 则为必需项。请使用具有写入权限的 Hugging Face Token。
+- `EMAIL_ACCOUNT`
+  - ClawEmail 邮箱地址（如 `agent@claw.163.com`）。设置后自动启用邮件渠道。
+- `EMAIL_TOKEN`
+  - 邮箱密码或 API Key。从 ClawEmail 后台获取。
+- `EMAIL_MODE`
+  - 连接模式，可选 `imap`（默认）或 `websocket`。
 
 ## 飞书配置设置
 
@@ -117,6 +123,41 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
 `ou_xxx...` 的值就是你应该填入 `FEISHU_ALLOW_FROM` 的发送者 `open_id`。
 
 如果你希望允许任何飞书用户发送私聊，请设置 `FEISHU_DM_POLICY=open` 并保留 `FEISHU_ALLOW_FROM` 为空，但这比 `allowlist` 限制更少。
+
+## 邮件渠道配置设置（ClawEmail）
+
+本模板支持通过 [ClawEmail](https://claw.163.com)（网易出品的 AI Agent 邮件服务）为 OpenClaw 网关接入邮件渠道。接入后，任何人发邮件到你的 Agent 专属邮箱地址，Agent 会自动处理并回复。
+
+### 准备工作
+
+1. 访问 [ClawEmail 官网](https://claw.163.com)，注册账号并登录后台。
+2. 在后台创建一个 Agent 邮箱（如 `agent@claw.163.com`）。
+3. 获取邮箱的密码或 API Key（用于身份验证）。
+
+### 在 HF Spaces 上配置
+
+1. 在 Space 的 `Settings -> Variables and secrets` 中设置：
+   - `EMAIL_ACCOUNT=<你的Agent邮箱地址>`（如 `agent@claw.163.com`）
+   - `EMAIL_TOKEN=<邮箱密码或API Key>`
+   - `EMAIL_MODE=imap`（默认，也可选 `websocket`）
+2. 重新构建或重启 Space。
+3. 启动后，确认日志包含：
+   - `[email] Email channel: ENABLED`
+   - `[email] Account: agent@claw.163.com`
+   - `[email] Connection mode: imap`
+4. 从任意邮箱（QQ邮箱、Gmail、Outlook 等）发送一封邮件到你的 Agent 邮箱地址。
+5. 等待片刻，确认收到自动回复邮件。
+
+### 连接模式说明
+
+| 模式 | 说明 | 适用场景 |
+|---|---|---|
+| `imap` | 通过 IMAP 协议轮询收件箱 | 默认模式，兼容性好 |
+| `websocket` | 通过 WebSocket 实时接收邮件事件 | 实时性要求高，需要 ClawEmail 支持 |
+
+### 免费额度
+
+ClawEmail 内测期间免费，每位用户可创建 5 个 Agent 邮箱，每月 3,000 封邮件。
 
 ## 免费版 Spaces 的状态持久化
 
@@ -178,6 +219,10 @@ Space 根路径 `/` 保留用于 Hugging Face 健康检查，应返回纯文本 
   - `FEISHU_APP_SECRET`
   - `FEISHU_DOMAIN=feishu`
   - `FEISHU_ALLOW_FROM=<你的open_id>`（设置后 dmPolicy 自动切为 allowlist）
+- **邮件渠道可选**（ClawEmail）
+  - `EMAIL_ACCOUNT=<你的Agent邮箱>@claw.163.com`
+  - `EMAIL_TOKEN=<邮箱密码或API Key>`
+  - `EMAIL_MODE=imap`（默认，也可选 `websocket`）
 - **推荐的行为标志**
   - `OPENCLAW_RESET_STATE_ON_BOOT=0`（保持 `0` 以保留配对和运行时状态）
   - `OPENCLAW_REWRITE_CONFIG_ON_BOOT=0`
@@ -351,6 +396,30 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
   - 启动脚本在找不到飞书插件的 `index.js` 时，会尝试从 npmmirror.com 下载。
   - 如果 HF 构建环境无法访问 npmmirror，会打印警告但不会阻止启动（网关仍会启动，只是飞书不可用）。
   - 解决方案：确保使用包含飞书插件的 OpenClaw 版本，或在构建时预装插件。
+
+### 邮件渠道（ClawEmail）
+
+- **日志显示 `Email channel: DISABLED`**
+  - 未设置 `EMAIL_ACCOUNT` 环境变量。在 HF Secrets 中添加 `EMAIL_ACCOUNT` 并重启。
+
+- **邮件插件下载失败：`Failed to download @clawemail/email`**
+  - 启动脚本尝试从 npm 下载 `@clawemail/email` 插件，但网络不通或包不存在。
+  - 解决方案：确认 npm registry 可访问，或在 Dockerfile 中预装插件。
+
+- **邮件渠道显示已连接但不回复邮件**
+  - 检查 `EMAIL_TOKEN` 是否正确（密码或 API Key）。
+  - 检查 `EMAIL_MODE` 是否与 ClawEmail 后台设置一致（`imap` 或 `websocket`）。
+  - 检查日志中是否有 IMAP 连接错误（如 `Authentication failed`）。
+  - 确认 `OPENROUTER_API_KEY` 或其他模型供应商密钥有效。
+
+- **发送邮件后长时间未收到回复**
+  - IMAP 模式下有轮询间隔，可能需要等待 1-2 分钟。
+  - 检查 ClawEmail 后台的邮箱状态是否正常。
+  - 检查日志中是否有邮件接收记录。
+
+- **`EMAIL_ACCOUNT` 和 `EMAIL_TOKEN` 在哪里获取？**
+  - 访问 [ClawEmail 后台](https://claw.163.com/projects/dashboard/)，注册账号后创建 Agent 邮箱。
+  - 邮箱地址即为 `EMAIL_ACCOUNT`，密码或 API Key 即为 `EMAIL_TOKEN`。
 
 ### 状态持久化
 
