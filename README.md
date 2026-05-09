@@ -219,8 +219,11 @@ docker run --rm -p 7860:7860 \
 
 - `Dockerfile`: OpenClaw 多阶段构建及运行镜像
 - `docker/nginx.conf`: 边缘认证 + 反向代理 + WebSocket 支持
-- `docker/start.sh`: 运行时校验、配置生成、进程启动
+- `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本
 - `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板
+- `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化逻辑
+- `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
+- `docker/openrouter_proxy.py`: 实现多 Key 负载均衡与 OpenRouter 代理故障转移
 
 ## 上游版本策略
 
