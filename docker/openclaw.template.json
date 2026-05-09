@@ -1,0 +1,71 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789,
+    "bind": "loopback",
+    "trustedProxies": ["127.0.0.1", "::1"],
+    "auth": {
+      "mode": "none",
+      "token": "${BROWSER_CONTROL_TOKEN}"
+    },
+    "controlUi": {
+      "enabled": true,
+      "basePath": "/openclaw",
+      "allowedOrigins": ["*"],
+      "dangerouslyDisableDeviceAuth": true
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": ${FEISHU_ENABLED},
+      "defaultAccount": "main",
+      "connectionMode": "websocket",
+      "domain": "${FEISHU_DOMAIN}",
+      "dmPolicy": "${FEISHU_DM_POLICY}",
+      "allowFrom": ${FEISHU_ALLOW_FROM_JSON},
+      "accounts": {
+        "main": {
+          "appId": "${FEISHU_APP_ID}",
+          "appSecret": "${FEISHU_APP_SECRET}",
+          "domain": "${FEISHU_DOMAIN}"
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "dashscope": {
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "apiKey": "${DASHSCOPE_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "qwen-turbo", "name": "Qwen Turbo (DashScope)" },
+          { "id": "qwen-plus", "name": "Qwen Plus (DashScope)" }
+        ]
+      },
+      "siliconflow": {
+        "baseUrl": "https://api.siliconflow.cn/v1",
+        "apiKey": "${SILICONFLOW_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "Qwen/Qwen2-7B-Instruct", "name": "Qwen2 7B Instruct (SiliconFlow Free)" },
+          { "id": "Qwen/Qwen2-1.5B-Instruct", "name": "Qwen2 1.5B Instruct (SiliconFlow Free)" },
+          { "id": "THUDM/glm-4-9b-chat", "name": "GLM-4-9B Chat (SiliconFlow Free)" }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "${OPENCLAW_DEFAULT_MODEL}"
+      }
+    }
+  },
+  "env": {
+    "OPENROUTER_API_KEYS": "${OPENROUTER_API_KEYS}",
+    "DASHSCOPE_API_KEY": "${DASHSCOPE_API_KEY}",
+    "SILICONFLOW_API_KEY": "${SILICONFLOW_API_KEY}"
+  }
+}
