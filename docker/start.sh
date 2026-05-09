@@ -307,15 +307,18 @@ node -e '
     cfg.channels.email = {
       enabled: true,
       defaultAccount: "main",
-      connectionMode: getEnv("EMAIL_MODE", "imap"),
       accounts: {
         main: {
           email: process.env.EMAIL_ACCOUNT,
-          token: process.env.EMAIL_TOKEN,
-          mode: getEnv("EMAIL_MODE", "imap")
+          token: process.env.EMAIL_TOKEN
         }
       }
     };
+  } else {
+    // EMAIL 未启用时，删除模板中的占位配置，避免 schema 校验失败
+    if (cfg.channels && cfg.channels.email) {
+      delete cfg.channels.email;
+    }
   }
   fs.writeFileSync(process.env.OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2));
 ' "${template_path}"
