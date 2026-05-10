@@ -413,7 +413,7 @@ node -e '
     .replace(/\$\{BROWSER_CONTROL_TOKEN\}/g, getEnv("BROWSER_CONTROL_TOKEN"))
     .replace(/\$\{DASHSCOPE_API_KEY\}/g, getEnv("DASHSCOPE_API_KEY"))
     .replace(/\$\{SILICONFLOW_API_KEY\}/g, getEnv("SILICONFLOW_API_KEY"))
-    .replace(/\$\{EMAIL_ENABLED\}/g, getEnv("EMAIL_ENABLED"))
+    .replace(/\$\{EMAIL_ENABLED\}/g, getEnv("EMAIL_ENABLED", "false"))
     .replace(/\$\{EMAIL_ACCOUNT\}/g, getEnv("EMAIL_ACCOUNT"))
     .replace(/\$\{EMAIL_TOKEN\}/g, getEnv("EMAIL_TOKEN"))
     .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"));
