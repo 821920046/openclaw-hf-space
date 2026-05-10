@@ -57,11 +57,8 @@ fi
 
 # --- 3c. 部署飞书文档创建技能 (必须在 FEISHU_ENABLED 定义之后) ---
 if [[ "${FEISHU_ENABLED}" == "true" ]]; then
-  FEISHU_SKILL_DST="${OPENCLAW_HOME}/.openclaw/workspace/skills/feishu-doc"
-  mkdir -p "${FEISHU_SKILL_DST}"
-
-  # 写入 create-doc.sh（飞书文档创建脚本）
-  cat > "${FEISHU_SKILL_DST}/create-doc.sh" << 'SCRIPT_EOF'
+  # 部署到 /usr/local/bin，agent 可直接用 feishu-create-doc "标题" 调用
+  cat > /usr/local/bin/feishu-create-doc << 'SCRIPT_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 TITLE="${1:-}"
@@ -122,82 +119,30 @@ OUTPUT_EOF
 echo "[feishu-doc] SUCCESS doc_id=${DOC_ID} url=${DOC_URL}" >&2
 SCRIPT_EOF
 
-  # 写入 SKILL.md（Agent 调用指南）
-  cat > "${FEISHU_SKILL_DST}/SKILL.md" << 'SKILLMD_EOF'
-# 飞书文档创建技能
+  chmod +x /usr/local/bin/feishu-create-doc
 
-使用飞书开放平台 API 创建飞书文档。
+  # 将 SKILL.md 写入 OpenClaw workspace（覆盖两个可能的路径）
+  for WS_BASE in "${OPENCLAW_HOME}/workspace" "${OPENCLAW_HOME}/.openclaw/workspace"; do
+    SKILL_DIR="${WS_BASE}/skills/feishu-doc"
+    mkdir -p "${SKILL_DIR}"
+    cat > "${SKILL_DIR}/SKILL.md" << 'SKILLMD_EOF'
+# Feishu Document Creator
 
-## 前置条件
-- 已在飞书开发者后台为应用开通以下权限：
-  - `docx:document`（管理新版文档）
-  - `drive:drive`（访问云空间）
-- 容器环境已设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`
-
-## 创建文档
-
-执行以下命令创建飞书文档：
-
-```bash
-bash ~/.openclaw/.openclaw/workspace/skills/feishu-doc/create-doc.sh "文档标题"
+To create a new Feishu document, run:
+```
+feishu-create-doc "Document Title"
 ```
 
-脚本成功后会输出文档的 URL（如 `https://bytedance.feishu.cn/docx/xxxxx`）。
+This creates an empty Feishu doc (title only) and returns the URL like https://bytedance.feishu.cn/docx/xxxxx.
 
-## 带内容创建文档（两阶段）
-
-飞书 API 不支持一步创建带内容的文档：
-
-**Step 1: 创建空文档**
-```bash
-bash ~/.openclaw/.openclaw/workspace/skills/feishu-doc/create-doc.sh "文档标题"
-```
-记录输的 Doc ID。
-
-**Step 2: 写入内容**
-先获取 tenant_access_token：
-```bash
-TOKEN=$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
-  -H "Content-Type: application/json; charset=utf-8" \
-  -d "{\"app_id\":\"$FEISHU_APP_ID\",\"app_secret\":\"$FEISHU_APP_SECRET\"}" | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['tenant_access_token'])")
-```
-
-再用 Python 调用 block API 写入内容：
-```python
-import json, requests
-doc_id = "从上一步获取的 document_id"
-
-# 读取本地 Markdown 并构建 blocks
-with open("content.md", "r", encoding="utf-8") as f:
-    content = f.read()
-
-blocks = []
-for para in content.split("\n\n"):
-    para = para.strip()
-    if not para: continue
-    blocks.append({
-        "block_type": 2,
-        "text": {"elements": [{"text_run": {"content": para}}], "style": {}}
-    })
-
-url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
-headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json; charset=utf-8"}
-resp = requests.post(url, headers=headers, json={"children": blocks, "index": -1})
-print("OK" if resp.json().get("code") == 0 else f"Failed: {resp.text}")
-```
-
-## API 端点参考
-
-| 用途 | 端点 |
-|------|------|
-| 获取 token | POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal |
-| 创建文档 | POST https://open.feishu.cn/open-apis/docx/v1/documents |
-| 写入内容 | POST https://open.feishu.cn/open-apis/docx/v1/documents/{id}/blocks/{id}/children |
+If you need to write content into the doc after creation:
+1. Use the document_id from the output
+2. Get a tenant_access_token
+3. POST to https://open.feishu.cn/open-apis/docx/v1/documents/{id}/blocks/{id}/children
 SKILLMD_EOF
+  done
 
-  chmod +x "${FEISHU_SKILL_DST}/create-doc.sh"
-  echo "[feishu-doc] Skill deployed to workspace: ${FEISHU_SKILL_DST}"
+  echo "[feishu-doc] feishu-create-doc deployed to /usr/local/bin/ and workspace"
 fi
 
 # --- 3d. 清理旧配置，保护配对状态 ---
