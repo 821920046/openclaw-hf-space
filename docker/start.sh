@@ -19,14 +19,148 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
 fi
 
 # --- 1b. 部署飞书文档创建技能 ---
-FEISHU_SKILL_SRC="/app/docker/skills/feishu-doc"
-FEISHU_SKILL_DST="${OPENCLAW_HOME}/.openclaw/workspace/skills/feishu-doc"
-if [[ "${FEISHU_ENABLED}" == "true" ]] && [[ -d "${FEISHU_SKILL_SRC}" ]]; then
+if [[ "${FEISHU_ENABLED}" == "true" ]]; then
+  FEISHU_SKILL_DST="${OPENCLAW_HOME}/.openclaw/workspace/skills/feishu-doc"
   mkdir -p "${FEISHU_SKILL_DST}"
-  cp -f "${FEISHU_SKILL_SRC}/SKILL.md" "${FEISHU_SKILL_DST}/SKILL.md"
-  cp -f "${FEISHU_SKILL_SRC}/create-doc.sh" "${FEISHU_SKILL_DST}/create-doc.sh"
+
+  # 写入 create-doc.sh（飞书文档创建脚本）
+  cat > "${FEISHU_SKILL_DST}/create-doc.sh" << 'SCRIPT_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+TITLE="${1:-}"
+if [[ -z "${TITLE}" ]]; then
+  echo "[feishu-doc] ERROR: 缺少文档标题" >&2
+  exit 1
+fi
+APP_ID="${FEISHU_APP_ID:-}"
+APP_SECRET="${FEISHU_APP_SECRET:-}"
+if [[ -z "${APP_ID}" || -z "${APP_SECRET}" ]]; then
+  echo "[feishu-doc] ERROR: 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET" >&2
+  exit 1
+fi
+echo "[feishu-doc] Getting tenant_access_token..." >&2
+TOKEN_RESP=$(curl -sS --max-time 10 \
+  -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d "$(python3 -c "import json,os; print(json.dumps({'app_id':os.environ['APP_ID'],'app_secret':os.environ['APP_SECRET']}))")" 2>&1)
+TOKEN=$(echo "${TOKEN_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('tenant_access_token',''))" 2>&1) || true
+if [[ -z "${TOKEN}" ]]; then
+  echo "[feishu-doc] ERROR: Failed to get token. Response: ${TOKEN_RESP}" >&2
+  exit 1
+fi
+echo "[feishu-doc] Creating document: ${TITLE}" >&2
+CREATE_RESP=$(curl -sS --max-time 15 \
+  -X POST "https://open.feishu.cn/open-apis/docx/v1/documents" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d "$(python3 -c "import json; print(json.dumps({'title':'${TITLE}'}))")" 2>&1)
+PARSE_RESULT=$(echo "${CREATE_RESP}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+code = d.get('code', -1)
+if code == 0:
+    doc = d['data']['document']
+    print('OK')
+    print(doc.get('document_id',''))
+    print(doc.get('url',''))
+    print(doc.get('title',''))
+else:
+    print('ERROR')
+    print(f'code={code} msg={d.get(\"msg\",\"\")}')
+") 2>&1
+STATUS=$(echo "${PARSE_RESULT}" | head -1)
+if [[ "${STATUS}" != "OK" ]]; then
+  echo "[feishu-doc] ERROR: Create failed. ${PARSE_RESULT}" >&2
+  exit 1
+fi
+DOC_ID=$(echo "${PARSE_RESULT}" | sed -n '2p')
+DOC_URL=$(echo "${PARSE_RESULT}" | sed -n '3p')
+DOC_TITLE=$(echo "${PARSE_RESULT}" | sed -n '4p')
+cat <<OUTPUT_EOF
+飞书文档创建成功！
+- 标题: ${DOC_TITLE}
+- 文档ID: ${DOC_ID}
+- 链接: ${DOC_URL}
+OUTPUT_EOF
+echo "[feishu-doc] SUCCESS doc_id=${DOC_ID} url=${DOC_URL}" >&2
+SCRIPT_EOF
+
+  # 写入 SKILL.md（Agent 调用指南）
+  cat > "${FEISHU_SKILL_DST}/SKILL.md" << 'SKILLMD_EOF'
+# 飞书文档创建技能
+
+使用飞书开放平台 API 创建飞书文档。
+
+## 前置条件
+- 已在飞书开发者后台为应用开通以下权限：
+  - `docx:document`（管理新版文档）
+  - `drive:drive`（访问云空间）
+- 容器环境已设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`
+
+## 创建文档
+
+执行以下命令创建飞书文档：
+
+```bash
+bash ~/.openclaw/.openclaw/workspace/skills/feishu-doc/create-doc.sh "文档标题"
+```
+
+脚本成功后会输出文档的 URL（如 `https://bytedance.feishu.cn/docx/xxxxx`）。
+
+## 带内容创建文档（两阶段）
+
+飞书 API 不支持一步创建带内容的文档：
+
+**Step 1: 创建空文档**
+```bash
+bash ~/.openclaw/.openclaw/workspace/skills/feishu-doc/create-doc.sh "文档标题"
+```
+记录输的 Doc ID。
+
+**Step 2: 写入内容**
+先获取 tenant_access_token：
+```bash
+TOKEN=$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d "{\"app_id\":\"$FEISHU_APP_ID\",\"app_secret\":\"$FEISHU_APP_SECRET\"}" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['tenant_access_token'])")
+```
+
+再用 Python 调用 block API 写入内容：
+```python
+import json, requests
+doc_id = "从上一步获取的 document_id"
+
+# 读取本地 Markdown 并构建 blocks
+with open("content.md", "r", encoding="utf-8") as f:
+    content = f.read()
+
+blocks = []
+for para in content.split("\n\n"):
+    para = para.strip()
+    if not para: continue
+    blocks.append({
+        "block_type": 2,
+        "text": {"elements": [{"text_run": {"content": para}}], "style": {}}
+    })
+
+url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
+headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json; charset=utf-8"}
+resp = requests.post(url, headers=headers, json={"children": blocks, "index": -1})
+print("OK" if resp.json().get("code") == 0 else f"Failed: {resp.text}")
+```
+
+## API 端点参考
+
+| 用途 | 端点 |
+|------|------|
+| 获取 token | POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal |
+| 创建文档 | POST https://open.feishu.cn/open-apis/docx/v1/documents |
+| 写入内容 | POST https://open.feishu.cn/open-apis/docx/v1/documents/{id}/blocks/{id}/children |
+SKILLMD_EOF
+
   chmod +x "${FEISHU_SKILL_DST}/create-doc.sh"
-  echo "[feishu-doc] Skill deployed to workspace"
+  echo "[feishu-doc] Skill deployed to workspace: ${FEISHU_SKILL_DST}"
 fi
 
 # --- 2b. 自动清理"坏味道"技能和插件 ---

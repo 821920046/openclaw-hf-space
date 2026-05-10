@@ -98,7 +98,6 @@ COPY docker/hf-state-store.py /app/docker/hf-state-store.py
 COPY docker/backup_api.py /app/docker/backup_api.py
 COPY docker/openrouter_proxy.py /app/docker/openrouter_proxy.py
 COPY docker/admin_api.py /app/docker/admin_api.py
-COPY docker/skills/ /app/docker/skills/
 
 RUN chmod +x /app/docker/start.sh /app/docker/hf-state-store.py /app/docker/backup_api.py /app/docker/openrouter_proxy.py /app/docker/admin_api.py \
     && mkdir -p /root/.openclaw/.openclaw/skills /var/lib/nginx /var/log/nginx /run/nginx \

@@ -126,7 +126,7 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
 
 ### 飞书文档创建
 
-本模板内置了飞书文档创建技能（`docker/skills/feishu-doc/`），使 OpenClaw agent 能够通过飞书开放平台 API 直接创建文档。
+本模板内置了飞书文档创建技能（`start.sh` 启动时自动生成到 workspace），使 OpenClaw agent 能够通过飞书开放平台 API 直接创建文档。
 
 **前置条件：**
 
@@ -145,7 +145,7 @@ Agent 会自动调用飞书 API 创建文档并返回链接（如 `https://byted
 
 **工作原理：**
 
-- 容器启动时，`start.sh` 将技能复制到 OpenClaw workspace（`~/.openclaw/.openclaw/workspace/skills/feishu-doc/`）
+- 容器启动时，`start.sh` 通过 heredoc 将技能文件生成到 OpenClaw workspace（`~/.openclaw/.openclaw/workspace/skills/feishu-doc/`）
 - `SKILL.md` 文件告知 agent 如何调用飞书文档 API
 - `create-doc.sh` 脚本封装了两步 API 调用：
   1. 获取 `tenant_access_token`
@@ -307,7 +307,7 @@ docker run --rm -p 7860:7860 \
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡与 OpenRouter 代理故障转移
-- `docker/skills/feishu-doc/`: 飞书文档创建技能，含 `SKILL.md`（Agent 调用指南）和 `create-doc.sh`（API 封装脚本）
+- `docker/start.sh` 内置飞书文档创建技能（启动时通过 heredoc 生成 `SKILL.md` + `create-doc.sh` 到 workspace）
 
 ## 上游版本策略
 
@@ -444,7 +444,7 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
   - 飞书 API 仅支持创建带标题的空文档。如需带内容创建，需分两步：
     1. 用 `create-doc.sh "标题"` 创建文档，记录 `document_id`
     2. 用 block API（`POST /docx/v1/documents/{id}/blocks/{id}/children`）写入内容
-  - 详细示例代码见 `docker/skills/feishu-doc/SKILL.md`
+  - 详细示例代码见 workspace 中的 `SKILL.md`（`~/.openclaw/.openclaw/workspace/skills/feishu-doc/SKILL.md`）
 
 ### 邮件渠道（ClawEmail）
 
