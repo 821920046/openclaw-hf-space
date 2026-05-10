@@ -18,7 +18,44 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
 
-# --- 1b. 部署飞书文档创建技能 ---
+# --- 2b. 自动清理"坏味道"技能和插件 ---
+# 强制清理持久化状态中损坏或不需要的技能/插件目录
+echo "[patch] Deep cleaning broken skills and unused plugins from persistent state..."
+rm -rf "${OPENCLAW_HOME}/.openclaw/workspace/skills/github-api" 2>/dev/null || true
+rm -rf "${OPENCLAW_HOME}/state/npm/node_modules/@clawemail" 2>/dev/null || true
+rm -rf "${OPENCLAW_HOME}/state/extensions/email" 2>/dev/null || true
+find "${OPENCLAW_HOME}" -name "mail-cli" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# --- 3. 变量解析 ---
+export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
+export FEISHU_APP_SECRET="${FEISHU_APP_SECRET:-}"
+export FEISHU_ENABLED=$([[ -n "${FEISHU_APP_ID}" ]] && echo "true" || echo "false")
+export FEISHU_ALLOW_FROM_JSON="[]"
+if [[ -n "${FEISHU_ALLOW_FROM:-}" ]]; then
+  export FEISHU_ALLOW_FROM_JSON=$(node -e "console.log(JSON.stringify('${FEISHU_ALLOW_FROM}'.split(',').map(s => s.trim()).filter(Boolean)))")
+fi
+
+# --- 3b. 飞书 dmPolicy 自动推断 ---
+# 如果用户显式设置了 FEISHU_DM_POLICY，尊重用户选择。
+# 否则根据 FEISHU_ALLOW_FROM 自动决定：
+#   - 有 allowFrom → allowlist（最可靠，不需要配对状态）
+#   - 无 allowFrom → open（免费层不依赖持久化配对）
+if [[ "${FEISHU_ENABLED}" == "true" ]]; then
+  if [[ -z "${FEISHU_DM_POLICY:-}" ]]; then
+    if [[ -n "${FEISHU_ALLOW_FROM:-}" ]]; then
+      export FEISHU_DM_POLICY="allowlist"
+      echo "[feishu] Auto-detected dmPolicy=allowlist (FEISHU_ALLOW_FROM is set)"
+    else
+      export FEISHU_DM_POLICY="open"
+      echo "[feishu] WARNING: No FEISHU_ALLOW_FROM set. Defaulting dmPolicy=open."
+      echo "[feishu]         Any Feishu user can DM the bot. For production, set FEISHU_ALLOW_FROM=<your open_id>."
+    fi
+  else
+    echo "[feishu] Using explicit dmPolicy=${FEISHU_DM_POLICY}"
+  fi
+fi
+
+# --- 3c. 部署飞书文档创建技能 (必须在 FEISHU_ENABLED 定义之后) ---
 if [[ "${FEISHU_ENABLED}" == "true" ]]; then
   FEISHU_SKILL_DST="${OPENCLAW_HOME}/.openclaw/workspace/skills/feishu-doc"
   mkdir -p "${FEISHU_SKILL_DST}"
@@ -163,58 +200,7 @@ SKILLMD_EOF
   echo "[feishu-doc] Skill deployed to workspace: ${FEISHU_SKILL_DST}"
 fi
 
-# --- 2b. 自动清理"坏味道"技能和插件 ---
-# 强制清理持久化状态中损坏或不需要的技能/插件目录
-echo "[patch] Deep cleaning broken skills and unused plugins from persistent state..."
-rm -rf "${OPENCLAW_HOME}/.openclaw/workspace/skills/github-api" 2>/dev/null || true
-rm -rf "${OPENCLAW_HOME}/state/npm/node_modules/@clawemail" 2>/dev/null || true
-rm -rf "${OPENCLAW_HOME}/state/extensions/email" 2>/dev/null || true
-find "${OPENCLAW_HOME}" -name "mail-cli" -type d -exec rm -rf {} + 2>/dev/null || true
-
-# --- 3. 变量解析 ---
-export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
-export FEISHU_APP_SECRET="${FEISHU_APP_SECRET:-}"
-export FEISHU_ENABLED=$([[ -n "${FEISHU_APP_ID}" ]] && echo "true" || echo "false")
-export FEISHU_ALLOW_FROM_JSON="[]"
-if [[ -n "${FEISHU_ALLOW_FROM:-}" ]]; then
-  export FEISHU_ALLOW_FROM_JSON=$(node -e "console.log(JSON.stringify('${FEISHU_ALLOW_FROM}'.split(',').map(s => s.trim()).filter(Boolean)))")
-fi
-
-# --- 3b. 飞书 dmPolicy 自动推断 ---
-# 如果用户显式设置了 FEISHU_DM_POLICY，尊重用户选择。
-# 否则根据 FEISHU_ALLOW_FROM 自动决定：
-#   - 有 allowFrom → allowlist（最可靠，不需要配对状态）
-#   - 无 allowFrom → open（免费层不依赖持久化配对）
-if [[ "${FEISHU_ENABLED}" == "true" ]]; then
-  if [[ -z "${FEISHU_DM_POLICY:-}" ]]; then
-    if [[ -n "${FEISHU_ALLOW_FROM:-}" ]]; then
-      export FEISHU_DM_POLICY="allowlist"
-      echo "[feishu] Auto-detected dmPolicy=allowlist (FEISHU_ALLOW_FROM is set)"
-    else
-      export FEISHU_DM_POLICY="open"
-      echo "[feishu] WARNING: No FEISHU_ALLOW_FROM set. Defaulting dmPolicy=open."
-      echo "[feishu]         Any Feishu user can DM the bot. For production, set FEISHU_ALLOW_FROM=<your open_id>."
-    fi
-  else
-    echo "[feishu] Using explicit dmPolicy=${FEISHU_DM_POLICY}"
-  fi
-fi
-
-# --- 3d. 邮件渠道变量解析 ---
-export EMAIL_ACCOUNT="${EMAIL_ACCOUNT:-}"
-export EMAIL_TOKEN="${EMAIL_TOKEN:-}"
-export EMAIL_MODE="${EMAIL_MODE:-imap}"
-export EMAIL_ENABLED=$([[ -n "${EMAIL_ACCOUNT}" ]] && echo "true" || echo "false")
-
-if [[ "${EMAIL_ENABLED}" == "true" ]]; then
-  echo "[email] Email channel: ENABLED"
-  echo "[email] Account: ${EMAIL_ACCOUNT}"
-  echo "[email] Connection mode: ${EMAIL_MODE}"
-else
-  echo "[email] Email channel: DISABLED (set EMAIL_ACCOUNT to enable)"
-fi
-
-# --- 3c. 清理旧配置，保护配对状态 ---
+# --- 3d. 清理旧配置，保护配对状态 ---
 # 从 HF 状态仓库恢复的 openclaw.json 可能包含旧版配置，与新模板冲突。
 # 必须在配置生成（第 5 步）之前清除，让模板重新生成。
 # 但保留 gateway.db 和配对文件，否则 allowlist/pairing 状态丢失。
@@ -501,28 +487,6 @@ if [ -f "$REAL_ENTRY" ]; then
     cat "$REAL_ENTRY" >> /tmp/b.js && mv /tmp/b.js "$REAL_ENTRY"
   fi
   chmod -R 755 "$FEISHU_DIR"
-fi
-
-# --- 6b. 邮件插件补全 ---
-EMAIL_DIR="/app/openclaw/dist/extensions/email"
-if [[ "${EMAIL_ENABLED}" == "true" ]]; then
-  if [ ! -d "$EMAIL_DIR" ] || [[ ! -f "$EMAIL_DIR/index.js" && ! -f "$EMAIL_DIR/dist/index.js" ]]; then
-    echo "[patch] Email plugin not found, installing @clawemail/email..."
-    mkdir -p "$EMAIL_DIR"
-    # 从 npm 下载插件包
-    npm pack @clawemail/email --pack-destination /tmp 2>/dev/null
-    EMAIL_TAR=$(ls /tmp/clawemail-email-*.tgz 2>/dev/null | head -n 1 || true)
-    if [[ -n "${EMAIL_TAR}" ]]; then
-      tar -xzf "${EMAIL_TAR}" -C /tmp/email_plugin 2>/dev/null && \
-        cp -r /tmp/email_plugin/package/* "$EMAIL_DIR/" 2>/dev/null || true
-      rm -rf /tmp/email_plugin /tmp/clawemail-email-*.tgz 2>/dev/null || true
-      echo "[patch] Email plugin installed to: $EMAIL_DIR"
-    else
-      echo "[patch] WARNING: Failed to download @clawemail/email. Email channel may not work."
-    fi
-  else
-    echo "[patch] Email plugin already present at: $EMAIL_DIR"
-  fi
 fi
 
 # --- 7. 启动进程 ---
