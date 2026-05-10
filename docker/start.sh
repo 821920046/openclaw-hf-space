@@ -18,6 +18,25 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
 
+# --- 1b. 部署飞书文档创建技能 ---
+FEISHU_SKILL_SRC="/app/docker/skills/feishu-doc"
+FEISHU_SKILL_DST="${OPENCLAW_HOME}/.openclaw/workspace/skills/feishu-doc"
+if [[ "${FEISHU_ENABLED}" == "true" ]] && [[ -d "${FEISHU_SKILL_SRC}" ]]; then
+  mkdir -p "${FEISHU_SKILL_DST}"
+  cp -f "${FEISHU_SKILL_SRC}/SKILL.md" "${FEISHU_SKILL_DST}/SKILL.md"
+  cp -f "${FEISHU_SKILL_SRC}/create-doc.sh" "${FEISHU_SKILL_DST}/create-doc.sh"
+  chmod +x "${FEISHU_SKILL_DST}/create-doc.sh"
+  echo "[feishu-doc] Skill deployed to workspace"
+fi
+
+# --- 2b. 自动清理"坏味道"技能和插件 ---
+# 强制清理持久化状态中损坏或不需要的技能/插件目录
+echo "[patch] Deep cleaning broken skills and unused plugins from persistent state..."
+rm -rf "${OPENCLAW_HOME}/.openclaw/workspace/skills/github-api" 2>/dev/null || true
+rm -rf "${OPENCLAW_HOME}/state/npm/node_modules/@clawemail" 2>/dev/null || true
+rm -rf "${OPENCLAW_HOME}/state/extensions/email" 2>/dev/null || true
+find "${OPENCLAW_HOME}" -name "mail-cli" -type d -exec rm -rf {} + 2>/dev/null || true
+
 # --- 3. 变量解析 ---
 export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
 export FEISHU_APP_SECRET="${FEISHU_APP_SECRET:-}"

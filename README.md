@@ -124,6 +124,39 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
 
 如果你希望允许任何飞书用户发送私聊，请设置 `FEISHU_DM_POLICY=open` 并保留 `FEISHU_ALLOW_FROM` 为空，但这比 `allowlist` 限制更少。
 
+### 飞书文档创建
+
+本模板内置了飞书文档创建技能（`docker/skills/feishu-doc/`），使 OpenClaw agent 能够通过飞书开放平台 API 直接创建文档。
+
+**前置条件：**
+
+1. 在飞书开发者后台 → 你的应用 → 权限管理中，确认以下权限已开通：
+   - `docx:document`（管理新版文档）
+   - `drive:drive`（访问云空间）
+2. 已配置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`
+
+**使用方式：**
+
+在飞书中给机器人发送消息，请求创建文档，例如：
+
+> 帮我创建一个飞书文档，标题为"AI资讯-2026-05-10"
+
+Agent 会自动调用飞书 API 创建文档并返回链接（如 `https://bytedance.feishu.cn/docx/xxxxx`）。
+
+**工作原理：**
+
+- 容器启动时，`start.sh` 将技能复制到 OpenClaw workspace（`~/.openclaw/.openclaw/workspace/skills/feishu-doc/`）
+- `SKILL.md` 文件告知 agent 如何调用飞书文档 API
+- `create-doc.sh` 脚本封装了两步 API 调用：
+  1. 获取 `tenant_access_token`
+  2. 调用 `POST /open-apis/docx/v1/documents` 创建文档
+
+**已知限制：**
+
+- 飞书 API 仅支持创建带标题的空文档，不支持一步创建带正文的文档
+- 如需写入正文内容，需分两步操作：先创建文档获取 `document_id`，再调用 block API 写入内容（`SKILL.md` 包含完整示例代码）
+- API 调用频率限制：3 次/秒/应用
+
 ## 邮件渠道配置设置（ClawEmail）
 
 本模板支持通过 [ClawEmail](https://claw.163.com)（网易出品的 AI Agent 邮件服务）为 OpenClaw 网关接入邮件渠道。接入后，任何人发邮件到你的 Agent 专属邮箱地址，Agent 会自动处理并回复。
@@ -274,6 +307,7 @@ docker run --rm -p 7860:7860 \
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡与 OpenRouter 代理故障转移
+- `docker/skills/feishu-doc/`: 飞书文档创建技能，含 `SKILL.md`（Agent 调用指南）和 `create-doc.sh`（API 封装脚本）
 
 ## 上游版本策略
 
@@ -396,6 +430,21 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
   - 启动脚本在找不到飞书插件的 `index.js` 时，会尝试从 npmmirror.com 下载。
   - 如果 HF 构建环境无法访问 npmmirror，会打印警告但不会阻止启动（网关仍会启动，只是飞书不可用）。
   - 解决方案：确保使用包含飞书插件的 OpenClaw 版本，或在构建时预装插件。
+
+- **飞书文档创建失败：`[feishu-doc] ERROR`**
+  - 检查启动日志是否包含 `[feishu-doc] Skill deployed to workspace`，如无此行说明技能未部署成功。
+  - 检查飞书应用权限：`docx:document` 和 `drive:drive` 是否已在飞书开发者后台开通。
+  - 检查 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 是否正确设置。
+  - 查看日志中 `[feishu-doc]` 开头的 stderr 输出，获取具体的 API 错误码和消息：
+    - `code=99991663` → 应用未开通文档权限
+    - `code=99991670` → 超出 API 调用频率限制（3次/秒）
+    - `code=99991672` → tenant_access_token 无效或已过期
+
+- **飞书文档创建成功但内容为空**
+  - 飞书 API 仅支持创建带标题的空文档。如需带内容创建，需分两步：
+    1. 用 `create-doc.sh "标题"` 创建文档，记录 `document_id`
+    2. 用 block API（`POST /docx/v1/documents/{id}/blocks/{id}/children`）写入内容
+  - 详细示例代码见 `docker/skills/feishu-doc/SKILL.md`
 
 ### 邮件渠道（ClawEmail）
 
