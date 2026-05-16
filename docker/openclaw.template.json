@@ -46,9 +46,7 @@
     }
   },
   "plugins": {
-    "slots": {
-      "memory": "basic-memory"
-    }
+    "slots": {}
   },
   "skills": {
     "entries": {}
