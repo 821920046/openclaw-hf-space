@@ -504,18 +504,27 @@ if [ -d "$FEISHU_DIR" ] && [[ ! -f "$FEISHU_DIR/index.js" && ! -f "$FEISHU_DIR/d
   echo "[patch] Feishu index.js not found, attempting download from npmmirror..."
 
   # 读取 Docker 构建时写入的版本 ref，匹配对应的飞书插件版本
-  # git tag v2026.5.3-1 → npm version 2026.5.3-1
+  # git tag 格式可能是 v2026.5.3-1 或 v2026.5.3，npm 版本可能不带 v 前缀和 -N 后缀
   BUILD_REF=$(cat /app/openclaw/.openclaw-build-ref 2>/dev/null || echo "")
-  NPM_VERSION="${BUILD_REF#v}"
+  NPM_VERSION="${BUILD_REF#v}"                           # v2026.5.3-1 → 2026.5.3-1
+  NPM_VERSION_BASE="${NPM_VERSION%-*}"                   # 2026.5.3-1 → 2026.5.3
 
   mkdir -p /tmp/feishu_tar
   TAR_URL=""
 
   # 优先下载版本匹配的插件（latest 版本可能与旧版 plugin-sdk 不兼容）
-  if [[ -n "${NPM_VERSION}" ]]; then
-    echo "[patch] Trying version-matched feishu: ${NPM_VERSION}..."
-    TAR_URL=$(curl -s --max-time 15 "https://registry.npmmirror.com/@openclaw/feishu/${NPM_VERSION}" | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
-  fi
+  # 尝试多种 npm 版本格式
+  for TRY_VER in "${NPM_VERSION}" "${NPM_VERSION_BASE}"; do
+    if [[ -z "${TRY_VER}" ]]; then
+      continue
+    fi
+    echo "[patch] Trying version-matched feishu: ${TRY_VER}..."
+    TAR_URL=$(curl -s --max-time 15 "https://registry.npmmirror.com/@openclaw/feishu/${TRY_VER}" | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+    if [[ -n "${TAR_URL}" ]]; then
+      echo "[patch] Version match succeeded: ${TRY_VER}"
+      break
+    fi
+  done
 
   # 版本匹配失败时回退到 latest
   if [[ -z "${TAR_URL}" ]]; then
@@ -615,32 +624,48 @@ PKGJSON2
   # 安全网：扫描飞书插件中所有 root-alias.cjs/<子模块> 引用，补齐缺失的
   if [ -d "$FEISHU_DIR" ] && [ -d "$PLUGIN_SDK_DIR/root-alias.cjs" ]; then
     echo "[patch] Scanning feishu plugin for root-alias.cjs/ sub-module references..."
-    grep -roh 'root-alias\.cjs/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null | sort -u | while read -r ref; do
-      sub=$(echo "$ref" | sed 's|root-alias\.cjs/||')
-      js_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.js"
-      cjs_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.cjs"
-      parent_js="$PLUGIN_SDK_DIR/${sub}.js"
-      parent_cjs="$PLUGIN_SDK_DIR/${sub}.cjs"
+    # 先捕获 grep 结果到变量，避免 pipefail + grep 无匹配时触发 set -e 退出
+    SCAN_REFS=$(grep -roh 'root-alias\.cjs/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null || true)
+    if [ -n "${SCAN_REFS}" ]; then
+      echo "${SCAN_REFS}" | sort -u | while read -r ref; do
+        sub=$(echo "$ref" | sed 's|root-alias\.cjs/||')
+        js_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.js"
+        cjs_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.cjs"
+        parent_js="$PLUGIN_SDK_DIR/${sub}.js"
+        parent_cjs="$PLUGIN_SDK_DIR/${sub}.cjs"
 
-      # 跳过已存在的
-      if [ -e "$js_target" ] || [ -e "$cjs_target" ]; then
-        continue
-      fi
+        # 跳过已存在的
+        if [ -e "$js_target" ] || [ -e "$cjs_target" ]; then
+          continue
+        fi
 
-      # 优先从父目录链接，否则创建存根
-      if [ -f "$parent_js" ]; then
-        ln -sf "../${sub}.js" "$js_target" 2>/dev/null || true
-        echo "[patch]   Linked ${sub}.js -> ../${sub}.js"
-      elif [ -f "$parent_cjs" ]; then
-        printf 'module.exports = require("../%s.cjs");\n' "$sub" > "$js_target"
-        echo "[patch]   Created stub ${sub}.js -> ../${sub}.cjs"
-      else
-        # 完全缺失：创建空模块存根（飞书插件可能只是引用但未实际调用）
-        printf 'module.exports = {};\n' > "$js_target"
-        echo "[patch]   Created empty stub: ${sub}.js (module not in plugin-sdk)"
-      fi
-    done
-    echo "[patch] root-alias.cjs/ sub-module scan complete"
+        # 优先从父目录链接，否则创建存根
+        if [ -f "$parent_js" ]; then
+          ln -sf "../${sub}.js" "$js_target" 2>/dev/null || true
+          echo "[patch]   Linked ${sub}.js -> ../${sub}.js"
+        elif [ -f "$parent_cjs" ]; then
+          printf 'module.exports = require("../%s.cjs");\n' "$sub" > "$js_target"
+          echo "[patch]   Created stub ${sub}.js -> ../${sub}.cjs"
+        else
+          # 完全缺失：模块不在当前 plugin-sdk 版本中（npm 插件比构建版本新）。
+          # 用 Proxy 代理代替空对象，对任意属性访问返回空函数，避免因调用未导出函数而崩溃。
+          cat > "$js_target" << 'PROXYEOF'
+// AUTO-STUB: module not present in this plugin-sdk version
+module.exports = new Proxy({}, {
+  get(target, prop) {
+    if (prop === '__esModule') return undefined;
+    if (typeof prop === 'symbol') return undefined;
+    return (...args) => undefined;
+  }
+});
+PROXYEOF
+          echo "[patch]   Created proxy stub: ${sub}.js (module not in this plugin-sdk version)"
+        fi
+      done
+      echo "[patch] root-alias.cjs/ sub-module scan complete"
+    else
+      echo "[patch] No root-alias.cjs/ sub-module references found in feishu plugin"
+    fi
   fi
 fi
 
