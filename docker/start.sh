@@ -502,9 +502,29 @@ node -e '
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ] && [[ ! -f "$FEISHU_DIR/index.js" && ! -f "$FEISHU_DIR/dist/index.js" ]]; then
   echo "[patch] Feishu index.js not found, attempting download from npmmirror..."
+
+  # 读取 Docker 构建时写入的版本 ref，匹配对应的飞书插件版本
+  # git tag v2026.5.3-1 → npm version 2026.5.3-1
+  BUILD_REF=$(cat /app/openclaw/.openclaw-build-ref 2>/dev/null || echo "")
+  NPM_VERSION="${BUILD_REF#v}"
+
   mkdir -p /tmp/feishu_tar
-  TAR_URL=$(curl -s --max-time 15 https://registry.npmmirror.com/@openclaw/feishu/latest | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+  TAR_URL=""
+
+  # 优先下载版本匹配的插件（latest 版本可能与旧版 plugin-sdk 不兼容）
+  if [[ -n "${NPM_VERSION}" ]]; then
+    echo "[patch] Trying version-matched feishu: ${NPM_VERSION}..."
+    TAR_URL=$(curl -s --max-time 15 "https://registry.npmmirror.com/@openclaw/feishu/${NPM_VERSION}" | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+  fi
+
+  # 版本匹配失败时回退到 latest
+  if [[ -z "${TAR_URL}" ]]; then
+    echo "[patch] Version match failed, falling back to latest..."
+    TAR_URL=$(curl -s --max-time 15 https://registry.npmmirror.com/@openclaw/feishu/latest | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+  fi
+
   if [[ -n "${TAR_URL}" ]]; then
+    echo "[patch] Downloading: ${TAR_URL}"
     curl -L --max-time 30 "${TAR_URL}" -o /tmp/feishu.tgz && tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
     cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/" 2>/dev/null || true
     echo "[patch] Feishu plugin downloaded successfully."
@@ -591,6 +611,37 @@ PKGJSON2
   done
 
   echo "[patch] Created root-alias.js/ directory (package.json type=module + symlinks)"
+
+  # 安全网：扫描飞书插件中所有 root-alias.cjs/<子模块> 引用，补齐缺失的
+  if [ -d "$FEISHU_DIR" ] && [ -d "$PLUGIN_SDK_DIR/root-alias.cjs" ]; then
+    echo "[patch] Scanning feishu plugin for root-alias.cjs/ sub-module references..."
+    grep -roh 'root-alias\.cjs/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null | sort -u | while read -r ref; do
+      sub=$(echo "$ref" | sed 's|root-alias\.cjs/||')
+      js_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.js"
+      cjs_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.cjs"
+      parent_js="$PLUGIN_SDK_DIR/${sub}.js"
+      parent_cjs="$PLUGIN_SDK_DIR/${sub}.cjs"
+
+      # 跳过已存在的
+      if [ -e "$js_target" ] || [ -e "$cjs_target" ]; then
+        continue
+      fi
+
+      # 优先从父目录链接，否则创建存根
+      if [ -f "$parent_js" ]; then
+        ln -sf "../${sub}.js" "$js_target" 2>/dev/null || true
+        echo "[patch]   Linked ${sub}.js -> ../${sub}.js"
+      elif [ -f "$parent_cjs" ]; then
+        printf 'module.exports = require("../%s.cjs");\n' "$sub" > "$js_target"
+        echo "[patch]   Created stub ${sub}.js -> ../${sub}.cjs"
+      else
+        # 完全缺失：创建空模块存根（飞书插件可能只是引用但未实际调用）
+        printf 'module.exports = {};\n' > "$js_target"
+        echo "[patch]   Created empty stub: ${sub}.js (module not in plugin-sdk)"
+      fi
+    done
+    echo "[patch] root-alias.cjs/ sub-module scan complete"
+  fi
 fi
 
 # --- 7. 启动进程（带 Watchdog 监控）---
