@@ -543,13 +543,20 @@ if [ -d "$PLUGIN_SDK_DIR" ]; then
     echo "[patch] WARNING: No CJS entry found for root-alias.cjs re-export"
   fi
 
-  # root-alias.js — 重导出 ESM 入口
+  # root-alias.js — 根据 package.json type 字段选择正确格式
+  # .js 文件的模块格式取决于 package.json "type"：module=ESM，否则=CJS
+  # 用错误格式写入会导致 SyntaxError 或 ERR_REQUIRE_ESM
   if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
     printf 'export * from "./index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
     echo "[patch] Created root-alias.js -> index.mjs"
   elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
-    printf 'export * from "./index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
-    echo "[patch] Created root-alias.js -> index.js"
+    if [ -f /app/openclaw/package.json ] && grep -q '"type"\s*:\s*"module"' /app/openclaw/package.json 2>/dev/null; then
+      printf 'export * from "./index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+      echo "[patch] Created root-alias.js -> index.js (ESM, pkg type=module)"
+    else
+      printf 'module.exports = require("./index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+      echo "[patch] Created root-alias.js -> index.js (CJS)"
+    fi
   fi
 fi
 
@@ -568,9 +575,9 @@ echo "[startup] openrouter_proxy started (PID: ${proxy_pid})"
 
 cd "${OPENCLAW_REPO_DIR}"
 echo "[startup] Starting Gateway..."
-# 不通过 tee 管道：bash 中 $! 捕获的是管道末端的 PID (tee)，而非 node 自身，
-# 会导致 Watchdog 监控到错误的进程，网关崩溃时无法及时发现。
-HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured > "${LOG_FILE}" 2>&1 &
+# 使用进程替换 >(tee) 而非管道 | tee：进程替换不影响 $! 的 PID 捕获，
+# 确保 Watchdog 拿到的是 node 进程 PID 而非 tee 的 PID。
+HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured > >(tee -a "${LOG_FILE}") 2>&1 &
 gateway_pid=$!
 echo "[startup] Gateway started (PID: ${gateway_pid})"
 
