@@ -522,42 +522,75 @@ if [ -f "$REAL_ENTRY" ]; then
   chmod -R 755 "$FEISHU_DIR"
 fi
 
-# 强制修复旧版飞书插件请求 root-alias.cjs 的问题
-# 上游构建生成的 root-alias.cjs 是一个空文件（或不存在），旧版飞书插件却 hardcode 了 require('./root-alias.cjs')。
-# Node 24 对以 .cjs/.js 结尾的目录或软链接会触发 ERR_INTERNAL_ASSERTION 崩溃。
-# 解决方案：创建简单的重导出文件（而非目录），让 Node 24 按正常 CJS/ESM 文件处理。
+# 强制修复飞书插件 require('root-alias.cjs/...') 子路径问题
+# 飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
+# 因此 root-alias.cjs 必须是目录（不是文件），否则子路径 require 直接 MODULE_NOT_FOUND。
+#
+# Node 24 对以 .cjs 命名的目录会触发 ERR_INTERNAL_ASSERTION。
+# 规避方式：目录内放置 package.json 显式声明 "type"，让 Node 24 跳过自动格式检测。
+# 子模块用软链接指向父目录真实文件（非拷贝），Node.js 按真实路径确定格式。
 PLUGIN_SDK_DIR="/app/openclaw/dist/plugin-sdk"
 if [ -d "$PLUGIN_SDK_DIR" ]; then
-  # 清理所有旧格式：文件、软链接、或上次启动残留的目录
+  # 清理所有旧格式：文件、软链接、旧版残留目录
   rm -rf "$PLUGIN_SDK_DIR/root-alias.cjs" 2>/dev/null || true
   rm -rf "$PLUGIN_SDK_DIR/root-alias.js" 2>/dev/null || true
 
-  # root-alias.cjs — 重导出 CJS 入口
+  # ============ root-alias.cjs/ 目录 (CJS) ============
+  mkdir -p "$PLUGIN_SDK_DIR/root-alias.cjs"
+
+  # package.json 显式声明 CJS，避免 Node 24 模块格式检测断言
+  cat > "$PLUGIN_SDK_DIR/root-alias.cjs/package.json" << 'PKGJSON'
+{"type": "commonjs", "main": "./index.js"}
+PKGJSON
+
+  # index.js: 重导出父目录 CJS 入口
   if [ -f "$PLUGIN_SDK_DIR/index.cjs" ]; then
-    printf 'module.exports = require("./index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
-    echo "[patch] Created root-alias.cjs -> index.cjs"
+    printf 'module.exports = require("../index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
   elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
-    printf 'module.exports = require("./index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
-    echo "[patch] Created root-alias.cjs -> index.js"
-  else
-    echo "[patch] WARNING: No CJS entry found for root-alias.cjs re-export"
+    printf 'module.exports = require("../index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
   fi
 
-  # root-alias.js — 根据 package.json type 字段选择正确格式
-  # .js 文件的模块格式取决于 package.json "type"：module=ESM，否则=CJS
-  # 用错误格式写入会导致 SyntaxError 或 ERR_REQUIRE_ESM
-  if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
-    printf 'export * from "./index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
-    echo "[patch] Created root-alias.js -> index.mjs"
-  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
-    if [ -f /app/openclaw/package.json ] && grep -q '"type"\s*:\s*"module"' /app/openclaw/package.json 2>/dev/null; then
-      printf 'export * from "./index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
-      echo "[patch] Created root-alias.js -> index.js (ESM, pkg type=module)"
-    else
-      printf 'module.exports = require("./index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.js"
-      echo "[patch] Created root-alias.js -> index.js (CJS)"
+  # 为父目录所有模块建立软链接（排除自身防止循环）
+  for item in "$PLUGIN_SDK_DIR"/*; do
+    base=$(basename "$item")
+    case "$base" in
+      root-alias*) continue ;;
+      *) ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}" 2>/dev/null || true ;;
+    esac
+  done
+
+  # .cjs → .js 软链接：require() 不带后缀时找不到 .cjs 文件
+  find "$PLUGIN_SDK_DIR/root-alias.cjs/" -maxdepth 1 -name "*.cjs" | while read -r f; do
+    base=$(basename "$f" .cjs)
+    if [ ! -e "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" ]; then
+      ln -sf "${base}.cjs" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" 2>/dev/null || true
     fi
+  done
+
+  echo "[patch] Created root-alias.cjs/ directory (package.json type=commonjs + symlinks)"
+
+  # ============ root-alias.js/ 目录 (ESM) ============
+  mkdir -p "$PLUGIN_SDK_DIR/root-alias.js"
+
+  cat > "$PLUGIN_SDK_DIR/root-alias.js/package.json" << 'PKGJSON2'
+{"type": "module", "main": "./index.js"}
+PKGJSON2
+
+  if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
+    printf 'export * from "../index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
+  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+    printf 'export * from "../index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
   fi
+
+  for item in "$PLUGIN_SDK_DIR"/*; do
+    base=$(basename "$item")
+    case "$base" in
+      root-alias*) continue ;;
+      *) ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.js/${base}" 2>/dev/null || true ;;
+    esac
+  done
+
+  echo "[patch] Created root-alias.js/ directory (package.json type=module + symlinks)"
 fi
 
 # --- 7. 启动进程（带 Watchdog 监控）---
