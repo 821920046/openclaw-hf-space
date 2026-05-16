@@ -6,7 +6,7 @@ export OPENCLAW_HOME="${OPENCLAW_HOME:-/root/.openclaw}"
 export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${OPENCLAW_HOME}/openclaw.json}"
 export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME}/state}"
 export OPENCLAW_REPO_DIR="${OPENCLAW_REPO_DIR:-/app/openclaw}"
-export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-openrouter/free}"
+export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-google/lyria-3-pro-preview}"
 export SPACE_HOST="${SPACE_HOST:-localhost:7860}"
 
 mkdir -p "${OPENCLAW_HOME}" "${OPENCLAW_STATE_DIR}" /var/log/nginx /var/lib/nginx /run/nginx
@@ -424,7 +424,16 @@ node -e '
       baseUrl: "http://127.0.0.1:18780/api/v1",
       apiKey: "dummy_proxy_key",
       api: "openai-completions",
-      models: [{ id: "openrouter/free", name: "OpenRouter Free (Auto)" }]
+      models: [
+        { id: "google/lyria-3-pro-preview", name: "Google Lyria 3 Pro (Free, 1M ctx)" },
+        { id: "deepseek/deepseek-v4-flash:free", name: "DeepSeek V4 Flash (Free, 1M ctx)" },
+        { id: "google/lyria-3-clip-preview", name: "Google Lyria 3 Clip (Free, 1M ctx)" },
+        { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)" },
+        { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)" },
+        { id: "arcee-ai/trinity-large-thinking:free", name: "Arcee Trinity Thinking (Free, 262K ctx)" },
+        { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)" },
+        { id: "openrouter/owl-alpha", name: "Owl Alpha (Free, 1M ctx)" }
+      ]
     };
   }
   if (process.env.FEISHU_ENABLED === "true") {
