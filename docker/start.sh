@@ -522,6 +522,37 @@ if [ -f "$REAL_ENTRY" ]; then
   chmod -R 755 "$FEISHU_DIR"
 fi
 
+# 强制修复旧版飞书插件请求 root-alias.cjs 的问题
+# 上游构建生成的 root-alias.cjs 是一个空文件（或不存在），旧版飞书插件却 hardcode 了 require('./root-alias.cjs')。
+# Node 24 对以 .cjs/.js 结尾的目录或软链接会触发 ERR_INTERNAL_ASSERTION 崩溃。
+# 解决方案：创建简单的重导出文件（而非目录），让 Node 24 按正常 CJS/ESM 文件处理。
+PLUGIN_SDK_DIR="/app/openclaw/dist/plugin-sdk"
+if [ -d "$PLUGIN_SDK_DIR" ]; then
+  # 清理所有旧格式：文件、软链接、或上次启动残留的目录
+  rm -rf "$PLUGIN_SDK_DIR/root-alias.cjs" 2>/dev/null || true
+  rm -rf "$PLUGIN_SDK_DIR/root-alias.js" 2>/dev/null || true
+
+  # root-alias.cjs — 重导出 CJS 入口
+  if [ -f "$PLUGIN_SDK_DIR/index.cjs" ]; then
+    printf 'module.exports = require("./index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
+    echo "[patch] Created root-alias.cjs -> index.cjs"
+  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+    printf 'module.exports = require("./index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
+    echo "[patch] Created root-alias.cjs -> index.js"
+  else
+    echo "[patch] WARNING: No CJS entry found for root-alias.cjs re-export"
+  fi
+
+  # root-alias.js — 重导出 ESM 入口
+  if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
+    printf 'export * from "./index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+    echo "[patch] Created root-alias.js -> index.mjs"
+  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+    printf 'export * from "./index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+    echo "[patch] Created root-alias.js -> index.js"
+  fi
+fi
+
 # --- 7. 启动进程（带 Watchdog 监控）---
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER:-admin}" "${BASIC_AUTH_PASSWORD:-admin}"
@@ -537,7 +568,9 @@ echo "[startup] openrouter_proxy started (PID: ${proxy_pid})"
 
 cd "${OPENCLAW_REPO_DIR}"
 echo "[startup] Starting Gateway..."
-HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured 2>&1 | tee -a "${LOG_FILE}" &
+# 不通过 tee 管道：bash 中 $! 捕获的是管道末端的 PID (tee)，而非 node 自身，
+# 会导致 Watchdog 监控到错误的进程，网关崩溃时无法及时发现。
+HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured > "${LOG_FILE}" 2>&1 &
 gateway_pid=$!
 echo "[startup] Gateway started (PID: ${gateway_pid})"
 
