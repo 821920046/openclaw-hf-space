@@ -217,6 +217,13 @@ node -e '
   const STUB = "export const " + EXPORT_NAME + " = (v) => v;";
   const REPO = process.env.OPENCLAW_REPO_DIR;
   const SUBPATH = "plugin-sdk/channel-streaming";
+
+  // 快速路径：先检查最可能的文件位置，已包含补丁则直接跳过
+  const FAST_PATH = path.join(REPO, "dist", SUBPATH + ".js");
+  if (fs.existsSync(FAST_PATH) && fs.readFileSync(FAST_PATH, "utf8").includes(EXPORT_NAME)) {
+    console.log("[patch] Already patched (fast check). Skipping.");
+    process.exit(0);
+  }
   const SUFFIXES = [".js", ".mjs", ".cjs", "/index.js", "/index.mjs", "/index.cjs"];
 
   // === 策略 1: 解析 package.json exports 字段 ===
@@ -407,8 +414,7 @@ node -e '
     .replace(/\$\{EMAIL_ENABLED\}/g, getEnv("EMAIL_ENABLED", "false"))
     .replace(/\$\{EMAIL_ACCOUNT\}/g, getEnv("EMAIL_ACCOUNT"))
     .replace(/\$\{EMAIL_TOKEN\}/g, getEnv("EMAIL_TOKEN"))
-    .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"))
-    .replace(/\$\{OPENCLAW_SKILLS_DIR\}/g, getEnv("OPENCLAW_SKILLS_DIR"));
+    .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"));
   let cfg = JSON.parse(cfgRaw);
 
   // --- 基础设施段（始终从环境变量/模板生成）---
@@ -501,44 +507,68 @@ node -e '
 # --- 6. 飞书插件补全 ---
 FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
 if [ -d "$FEISHU_DIR" ] && [[ ! -f "$FEISHU_DIR/index.js" && ! -f "$FEISHU_DIR/dist/index.js" ]]; then
-  echo "[patch] Feishu index.js not found, attempting download from npmmirror..."
-
   # 读取 Docker 构建时写入的版本 ref，匹配对应的飞书插件版本
-  # git tag 格式可能是 v2026.5.3-1 或 v2026.5.3，npm 版本可能不带 v 前缀和 -N 后缀
   BUILD_REF=$(cat /app/openclaw/.openclaw-build-ref 2>/dev/null || echo "")
   NPM_VERSION="${BUILD_REF#v}"                           # v2026.5.3-1 → 2026.5.3-1
   NPM_VERSION_BASE="${NPM_VERSION%-*}"                   # 2026.5.3-1 → 2026.5.3
 
-  mkdir -p /tmp/feishu_tar
-  TAR_URL=""
+  # 先检查本地缓存（持久化在 OPENCLAW_HOME 中，通过 hf-state 跨重启保留）
+  FEISHU_CACHE_DIR="${OPENCLAW_HOME}/cache/feishu-plugin"
+  FEISHU_CACHE_VER=""
+  if [ -d "$FEISHU_CACHE_DIR" ]; then
+    FEISHU_CACHE_VER=$(cat "${FEISHU_CACHE_DIR}/.version" 2>/dev/null || echo "")
+  fi
 
-  # 优先下载版本匹配的插件（latest 版本可能与旧版 plugin-sdk 不兼容）
-  # 尝试多种 npm 版本格式
-  for TRY_VER in "${NPM_VERSION}" "${NPM_VERSION_BASE}"; do
-    if [[ -z "${TRY_VER}" ]]; then
-      continue
-    fi
-    echo "[patch] Trying version-matched feishu: ${TRY_VER}..."
-    TAR_URL=$(curl -s --max-time 15 "https://registry.npmmirror.com/@openclaw/feishu/${TRY_VER}" | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
-    if [[ -n "${TAR_URL}" ]]; then
-      echo "[patch] Version match succeeded: ${TRY_VER}"
+  DOWNLOAD_NEEDED=1
+  for TRY_VER in "${NPM_VERSION_BASE}" "${NPM_VERSION}"; do
+    if [[ -z "${TRY_VER}" ]]; then continue; fi
+    # 缓存命中：版本匹配且入口文件存在
+    if [[ "${FEISHU_CACHE_VER}" == "${TRY_VER}" ]] && [ -f "${FEISHU_CACHE_DIR}/index.js" ]; then
+      echo "[patch] Feishu plugin cache hit (version ${TRY_VER}), copying from cache..."
+      cp -r "${FEISHU_CACHE_DIR}/"* "$FEISHU_DIR/" 2>/dev/null || true
+      DOWNLOAD_NEEDED=0
       break
     fi
   done
 
-  # 版本匹配失败时回退到 latest
-  if [[ -z "${TAR_URL}" ]]; then
-    echo "[patch] Version match failed, falling back to latest..."
-    TAR_URL=$(curl -s --max-time 15 https://registry.npmmirror.com/@openclaw/feishu/latest | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
-  fi
+  if [ "${DOWNLOAD_NEEDED}" == "1" ]; then
+    echo "[patch] Feishu index.js not found, attempting download from npmmirror..."
 
-  if [[ -n "${TAR_URL}" ]]; then
-    echo "[patch] Downloading: ${TAR_URL}"
-    curl -L --max-time 30 "${TAR_URL}" -o /tmp/feishu.tgz && tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
-    cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/" 2>/dev/null || true
-    echo "[patch] Feishu plugin downloaded successfully."
-  else
-    echo "[patch] WARNING: Could not fetch feishu tarball URL. Plugin may not be available."
+    mkdir -p /tmp/feishu_tar
+    TAR_URL=""
+
+    # 优先下载版本匹配的插件
+    for TRY_VER in "${NPM_VERSION}" "${NPM_VERSION_BASE}"; do
+      if [[ -z "${TRY_VER}" ]]; then continue; fi
+      echo "[patch] Trying version-matched feishu: ${TRY_VER}..."
+      TAR_URL=$(curl -s --max-time 15 "https://registry.npmmirror.com/@openclaw/feishu/${TRY_VER}" | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+      if [[ -n "${TAR_URL}" ]]; then
+        echo "[patch] Version match succeeded: ${TRY_VER}"
+        break
+      fi
+    done
+
+    if [[ -z "${TAR_URL}" ]]; then
+      echo "[patch] Version match failed, falling back to latest..."
+      TAR_URL=$(curl -s --max-time 15 https://registry.npmmirror.com/@openclaw/feishu/latest | node -e "try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(d.dist.tarball)}catch(e){}" || true)
+    fi
+
+    if [[ -n "${TAR_URL}" ]]; then
+      echo "[patch] Downloading: ${TAR_URL}"
+      curl -L --max-time 30 "${TAR_URL}" -o /tmp/feishu.tgz && tar -xzf /tmp/feishu.tgz -C /tmp/feishu_tar
+      cp -r /tmp/feishu_tar/package/* "$FEISHU_DIR/" 2>/dev/null || true
+      echo "[patch] Feishu plugin downloaded successfully."
+
+      # 写入本地缓存，下次重启直接用
+      MATCHED_VER="${TAR_URL##*feishu-}"  # 从 URL 提取版本号 feishu-2026.5.3.tgz → 2026.5.3.tgz
+      MATCHED_VER="${MATCHED_VER%.tgz}"
+      mkdir -p "$FEISHU_CACHE_DIR"
+      cp -r "$FEISHU_DIR/"* "$FEISHU_CACHE_DIR/" 2>/dev/null || true
+      echo "${MATCHED_VER}" > "${FEISHU_CACHE_DIR}/.version"
+      echo "[patch] Cached feishu plugin (version ${MATCHED_VER}) to ${FEISHU_CACHE_DIR}"
+    else
+      echo "[patch] WARNING: Could not fetch feishu tarball URL. Plugin may not be available."
+    fi
   fi
 fi
 
@@ -552,120 +582,111 @@ if [ -f "$REAL_ENTRY" ]; then
 fi
 
 # 强制修复飞书插件 require('root-alias.cjs/...') 子路径问题
-# 飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
-# 因此 root-alias.cjs 必须是目录（不是文件），否则子路径 require 直接 MODULE_NOT_FOUND。
-#
-# Node 24 对以 .cjs 命名的目录会触发 ERR_INTERNAL_ASSERTION。
-# 规避方式：目录内放置 package.json 显式声明 "type"，让 Node 24 跳过自动格式检测。
-# 子模块用软链接指向父目录真实文件（非拷贝），Node.js 按真实路径确定格式。
+# 旧版飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
+# 若插件引用子模块 → root-alias.cjs 必须是目录（含 package.json + 软链接）
+# 若插件不引用子模块（版本匹配的常见情况）→ 简单重导出文件即可
 PLUGIN_SDK_DIR="/app/openclaw/dist/plugin-sdk"
 if [ -d "$PLUGIN_SDK_DIR" ]; then
-  # 清理所有旧格式：文件、软链接、旧版残留目录
+  # 清理旧格式：文件、软链接、目录
   rm -rf "$PLUGIN_SDK_DIR/root-alias.cjs" 2>/dev/null || true
   rm -rf "$PLUGIN_SDK_DIR/root-alias.js" 2>/dev/null || true
 
-  # ============ root-alias.cjs/ 目录 (CJS) ============
-  mkdir -p "$PLUGIN_SDK_DIR/root-alias.cjs"
+  # 先扫描飞书插件，判断是否需要目录结构
+  NEED_CJS_DIR=0
+  NEED_JS_DIR=0
+  if [ -d "$FEISHU_DIR" ]; then
+    if grep -rq 'root-alias\.cjs/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null; then
+      NEED_CJS_DIR=1
+    fi
+    if grep -rq 'root-alias\.js/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null; then
+      NEED_JS_DIR=1
+    fi
+  fi
 
-  # package.json 显式声明 CJS，避免 Node 24 模块格式检测断言
-  cat > "$PLUGIN_SDK_DIR/root-alias.cjs/package.json" << 'PKGJSON'
+  # ---- root-alias.cjs ----
+  if [ "${NEED_CJS_DIR}" == "1" ]; then
+    echo "[patch] Plugin references root-alias.cjs/sub-modules — creating directory with symlinks..."
+    mkdir -p "$PLUGIN_SDK_DIR/root-alias.cjs"
+    cat > "$PLUGIN_SDK_DIR/root-alias.cjs/package.json" << 'PKGJSON'
 {"type": "commonjs", "main": "./index.js"}
 PKGJSON
-
-  # index.js: 重导出父目录 CJS 入口
-  if [ -f "$PLUGIN_SDK_DIR/index.cjs" ]; then
-    printf 'module.exports = require("../index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
-  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
-    printf 'module.exports = require("../index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
+    if [ -f "$PLUGIN_SDK_DIR/index.cjs" ]; then
+      printf 'module.exports = require("../index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
+    elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+      printf 'module.exports = require("../index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs/index.js"
+    fi
+    for item in "$PLUGIN_SDK_DIR"/*; do
+      base=$(basename "$item")
+      case "$base" in root-alias*) continue ;; esac
+      ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}" 2>/dev/null || true
+    done
+    find "$PLUGIN_SDK_DIR/root-alias.cjs/" -maxdepth 1 -name "*.cjs" | while read -r f; do
+      base=$(basename "$f" .cjs)
+      [ ! -e "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" ] && ln -sf "${base}.cjs" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" 2>/dev/null || true
+    done
+    echo "[patch] Created root-alias.cjs/ directory with symlinks"
+  else
+    # 简单重导出文件
+    if [ -f "$PLUGIN_SDK_DIR/index.cjs" ]; then
+      printf 'module.exports = require("./index.cjs");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
+    elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+      printf 'module.exports = require("./index.js");\n' > "$PLUGIN_SDK_DIR/root-alias.cjs"
+    fi
+    echo "[patch] Created root-alias.cjs (simple re-export file)"
   fi
 
-  # 为父目录所有模块建立软链接（排除自身防止循环）
-  for item in "$PLUGIN_SDK_DIR"/*; do
-    base=$(basename "$item")
-    case "$base" in
-      root-alias*) continue ;;
-      *) ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}" 2>/dev/null || true ;;
-    esac
-  done
-
-  # .cjs → .js 软链接：require() 不带后缀时找不到 .cjs 文件
-  find "$PLUGIN_SDK_DIR/root-alias.cjs/" -maxdepth 1 -name "*.cjs" | while read -r f; do
-    base=$(basename "$f" .cjs)
-    if [ ! -e "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" ]; then
-      ln -sf "${base}.cjs" "$PLUGIN_SDK_DIR/root-alias.cjs/${base}.js" 2>/dev/null || true
-    fi
-  done
-
-  echo "[patch] Created root-alias.cjs/ directory (package.json type=commonjs + symlinks)"
-
-  # ============ root-alias.js/ 目录 (ESM) ============
-  mkdir -p "$PLUGIN_SDK_DIR/root-alias.js"
-
-  cat > "$PLUGIN_SDK_DIR/root-alias.js/package.json" << 'PKGJSON2'
+  # ---- root-alias.js ----
+  if [ "${NEED_JS_DIR}" == "1" ]; then
+    echo "[patch] Plugin references root-alias.js/sub-modules — creating directory with symlinks..."
+    mkdir -p "$PLUGIN_SDK_DIR/root-alias.js"
+    cat > "$PLUGIN_SDK_DIR/root-alias.js/package.json" << 'PKGJSON2'
 {"type": "module", "main": "./index.js"}
 PKGJSON2
-
-  if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
-    printf 'export * from "../index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
-  elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
-    printf 'export * from "../index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
+    if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
+      printf 'export * from "../index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
+    elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+      printf 'export * from "../index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js/index.js"
+    fi
+    for item in "$PLUGIN_SDK_DIR"/*; do
+      base=$(basename "$item")
+      case "$base" in root-alias*) continue ;; esac
+      ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.js/${base}" 2>/dev/null || true
+    done
+    echo "[patch] Created root-alias.js/ directory with symlinks"
+  else
+    if [ -f "$PLUGIN_SDK_DIR/index.mjs" ]; then
+      printf 'export * from "./index.mjs";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+    elif [ -f "$PLUGIN_SDK_DIR/index.js" ]; then
+      printf 'export * from "./index.js";\n' > "$PLUGIN_SDK_DIR/root-alias.js"
+    fi
+    echo "[patch] Created root-alias.js (simple re-export file)"
   fi
 
-  for item in "$PLUGIN_SDK_DIR"/*; do
-    base=$(basename "$item")
-    case "$base" in
-      root-alias*) continue ;;
-      *) ln -sf "../${base}" "$PLUGIN_SDK_DIR/root-alias.js/${base}" 2>/dev/null || true ;;
-    esac
-  done
-
-  echo "[patch] Created root-alias.js/ directory (package.json type=module + symlinks)"
-
-  # 安全网：扫描飞书插件中所有 root-alias.cjs/<子模块> 引用，补齐缺失的
-  if [ -d "$FEISHU_DIR" ] && [ -d "$PLUGIN_SDK_DIR/root-alias.cjs" ]; then
-    echo "[patch] Scanning feishu plugin for root-alias.cjs/ sub-module references..."
-    # 先捕获 grep 结果到变量，避免 pipefail + grep 无匹配时触发 set -e 退出
+  # 安全网：若插件引用了 root-alias.cjs/ 子模块但父目录中没有，补齐 stub
+  if [ "${NEED_CJS_DIR}" == "1" ]; then
+    echo "[patch] Scanning feishu plugin for missing root-alias.cjs/ sub-modules..."
     SCAN_REFS=$(grep -roh 'root-alias\.cjs/[a-zA-Z0-9_-]*' "$FEISHU_DIR" 2>/dev/null || true)
     if [ -n "${SCAN_REFS}" ]; then
       echo "${SCAN_REFS}" | sort -u | while read -r ref; do
         sub=$(echo "$ref" | sed 's|root-alias\.cjs/||')
         js_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.js"
         cjs_target="$PLUGIN_SDK_DIR/root-alias.cjs/${sub}.cjs"
-        parent_js="$PLUGIN_SDK_DIR/${sub}.js"
-        parent_cjs="$PLUGIN_SDK_DIR/${sub}.cjs"
-
-        # 跳过已存在的
-        if [ -e "$js_target" ] || [ -e "$cjs_target" ]; then
-          continue
-        fi
-
-        # 优先从父目录链接，否则创建存根
-        if [ -f "$parent_js" ]; then
+        [ -e "$js_target" ] || [ -e "$cjs_target" ] && continue
+        if [ -f "$PLUGIN_SDK_DIR/${sub}.js" ]; then
           ln -sf "../${sub}.js" "$js_target" 2>/dev/null || true
-          echo "[patch]   Linked ${sub}.js -> ../${sub}.js"
-        elif [ -f "$parent_cjs" ]; then
+          echo "[patch]   Linked ${sub}.js"
+        elif [ -f "$PLUGIN_SDK_DIR/${sub}.cjs" ]; then
           printf 'module.exports = require("../%s.cjs");\n' "$sub" > "$js_target"
           echo "[patch]   Created stub ${sub}.js -> ../${sub}.cjs"
         else
-          # 完全缺失：模块不在当前 plugin-sdk 版本中（npm 插件比构建版本新）。
-          # 用 Proxy 代理代替空对象，对任意属性访问返回空函数，避免因调用未导出函数而崩溃。
           cat > "$js_target" << 'PROXYEOF'
-// AUTO-STUB: module not present in this plugin-sdk version
-module.exports = new Proxy({}, {
-  get(target, prop) {
-    if (prop === '__esModule') return undefined;
-    if (typeof prop === 'symbol') return undefined;
-    return (...args) => undefined;
-  }
-});
+module.exports = new Proxy({}, { get(t,p) { return (...a) => {}; } });
 PROXYEOF
-          echo "[patch]   Created proxy stub: ${sub}.js (module not in this plugin-sdk version)"
+          echo "[patch]   Created proxy stub: ${sub}.js"
         fi
       done
-      echo "[patch] root-alias.cjs/ sub-module scan complete"
-    else
-      echo "[patch] No root-alias.cjs/ sub-module references found in feishu plugin"
     fi
+    echo "[patch] root-alias.cjs/ sub-module scan complete"
   fi
 fi
 
@@ -675,6 +696,11 @@ htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER:-admin}" "${BASIC_AUTH_PASS
 
 # 日志目录（供 admin_api 读取）
 mkdir -p /tmp/openclaw
+# 保留最近 5 个日志文件，删除旧的
+OLD_LOGS=$(ls -1t /tmp/openclaw/openclaw-*.log 2>/dev/null || true)
+if [ -n "$OLD_LOGS" ]; then
+  echo "$OLD_LOGS" | tail -n +6 | while read -r f; do rm -f "$f" 2>/dev/null || true; done
+fi
 LOG_FILE="/tmp/openclaw/openclaw-$(date +%Y%m%d-%H%M%S).log"
 
 # 启动所有服务并记录 PID

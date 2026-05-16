@@ -3,6 +3,7 @@ import os
 import json
 import glob
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 try:
     from huggingface_hub import HfApi
@@ -299,8 +300,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 if __name__ == '__main__':
-    server = HTTPServer(('127.0.0.1', PORT), AdminHandler)
+    server = ThreadedHTTPServer(('127.0.0.1', PORT), AdminHandler)
     print(f"Admin API listening on 127.0.0.1:{PORT}")
     try:
         server.serve_forever()
