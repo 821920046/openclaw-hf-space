@@ -219,8 +219,9 @@ Hugging Face 免费 Docker Spaces 不提供持久化的本地磁盘，因此 `/r
 
 权衡说明：
 
-- 如果从保存的状态存档恢复，恢复后的 `openclaw.json` 默认会被保留。
-- 如果以后更改了 Hugging Face 环境变量并需要它们覆盖恢复出的配置，请在重启时临时设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1`。
+- 之前的版本在恢复状态后会清除 `openclaw.json`，导致用户在 UI 中配置的记忆插件等失效。
+- **现已优化：** 启动脚本现在采用**智能合并策略**。它会保留恢复出的 `openclaw.json` 中的 `plugins`、`skills`、`memory` 和 `extensions` 等用户自定义段，仅用模板覆盖网络和网关等基础设施配置。
+- 如果以后更改了 Hugging Face 环境变量并需要它们**强制全量覆盖**恢复出的配置，请在重启时临时设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1`。
 
 ## 部署步骤
 
@@ -299,15 +300,24 @@ docker run --rm -p 7860:7860 \
 
 ## 文件说明
 
-- `Dockerfile`: OpenClaw 多阶段构建及运行镜像
-- `docker/nginx.conf`: 边缘认证 + 反向代理 + WebSocket 支持
-- `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本
-- `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板
-- `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化逻辑
+- `Dockerfile`: OpenClaw 多阶段构建及运行镜像（已修正 skills 目录路径映射）
+- `docker/nginx.conf`: 边缘认证 + 反向代理 + WebSocket 支持（已开启 gzip 压缩和基础防暴破限速）
+- `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本（已内置智能配置合并与进程 Watchdog 监控）
+- `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板（默认开启 `basic-memory` 记忆插槽）
+- `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化（支持指数退避重试与恢复完整性校验）
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
-- `docker/openrouter_proxy.py`: 实现多 Key 负载均衡与 OpenRouter 代理故障转移
+- `docker/openrouter_proxy.py`: 实现多 Key 负载均衡、多线程并发转发、请求超时保护与 OpenRouter 代理故障转移
 - `docker/start.sh` 内置飞书文档创建技能（启动时通过 heredoc 生成 `SKILL.md` + `create-doc.sh` 到 workspace）
+
+## 系统稳定性保障 (2026.05 优化)
+
+为了克服免费版 Hugging Face Space 的资源限制与网络波动，本模板在底层进行了深度加固：
+
+1. **智能配置保护**：不再因为 Space 重启而丢失记忆插件（Memory）和技能（Skills）的设置，引擎会自动将上一次保存的用户配置无缝合并到新环境。
+2. **多线程并发代理**：`openrouter_proxy.py` 从单线程升级为多线程非阻塞架构，自带 120 秒超时保护，彻底解决因上游模型 API 慢速响应导致的网关卡死问题；并支持 429/401/403 错误的主动隔离与冷却轮换。
+3. **进程守护 (Watchdog)**：`start.sh` 启动后会进入守护模式，每 30 秒轮询所有子进程（Nginx, Proxy, API 等），遇到意外崩溃会自动拉起，避免单点故障导致服务不可用。
+4. **可靠的状态同步**：`hf-state-store.py` 在向 HF 数据集仓库提交备份时，如遇网络波动，将执行最多 3 次指数退避重试；关机时也能保证触发最后一次强制同步。
 
 ## 上游版本策略
 
@@ -475,10 +485,9 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 - **重启后运行时状态消失**
   - 配置 `HF_TOKEN` 和 `OPENCLAW_HF_STATE_REPO`，以便模板将 `~/.openclaw` 备份到私有的 Hugging Face 数据集仓库，并在下次启动时恢复。
 
-- **状态恢复后配置被旧数据覆盖**
-  - 从 HF 状态仓库恢复的 `openclaw.json` 可能包含旧版本的配置，与新模板冲突。
-  - 启动脚本现在会在每次启动时清除旧的 `openclaw.json` 并从模板重新生成，同时保留 `gateway.db`（配对状态）。
-  - 如果需要强制覆盖恢复出的配置，设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1`。
+- **从 HF 状态仓库恢复的 openclaw.json 可能包含旧版本的配置，与新模板冲突。**
+  - **已解决**：启动脚本现已采用智能合并机制。用户的记忆（memory）、技能（skills）、插件（plugins）等配置会被完美保留，不会再被新模板覆盖回空白状态。
+  - 如果需要强制全量覆盖恢复出的配置（放弃自定义修改），请在环境变量中设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1` 并重启。
 
 - **状态仓库体积膨胀**
   - 随着时间推移，HF Dataset 仓库可能因历史提交积累变得很大。
