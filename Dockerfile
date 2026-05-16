@@ -84,10 +84,19 @@ RUN apt-get update \
         python3 \
         python3-pip \
         curl \
+        build-essential \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
-RUN python3 -m pip install --break-system-packages --no-cache-dir huggingface_hub==1.7.1 requests==2.31.0
+# 安装飞书 CLI 和常用 Python 库
+RUN npm install -g @lark-opdev/cli --registry=https://registry.npmmirror.com \
+    && python3 -m pip install --break-system-packages --no-cache-dir \
+        huggingface_hub==1.7.1 \
+        requests==2.31.0 \
+        lark-oapi \
+        pydantic \
+        httpx
 
 WORKDIR /app
 COPY --from=builder /src/openclaw /app/openclaw
@@ -100,7 +109,7 @@ COPY docker/openrouter_proxy.py /app/docker/openrouter_proxy.py
 COPY docker/admin_api.py /app/docker/admin_api.py
 
 RUN chmod +x /app/docker/start.sh /app/docker/hf-state-store.py /app/docker/backup_api.py /app/docker/openrouter_proxy.py /app/docker/admin_api.py \
-    && mkdir -p /root/.openclaw/.openclaw/skills /var/lib/nginx /var/log/nginx /run/nginx \
+    && mkdir -p /root/.openclaw/workspace/skills /var/lib/nginx /var/log/nginx /run/nginx \
     && chmod -R 777 /root/.openclaw
 
 EXPOSE 7860

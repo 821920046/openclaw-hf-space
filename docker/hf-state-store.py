@@ -100,7 +100,16 @@ def command_restore(args: argparse.Namespace) -> int:
     restore_home(args.home, archive_path)
     digest = compute_sha256(archive_path)
     write_hash(args.hash_cache, digest)
-    log(f"restored {args.home} from {args.repo_type} repo {args.repo_id} ({args.archive_name})")
+
+    # 完整性校验：确认关键文件存在
+    critical_paths = [args.home]
+    missing = [str(p) for p in critical_paths if not p.exists()]
+    if missing:
+        log(f"WARNING: restore integrity check failed, missing: {missing}")
+        return 1
+
+    restored_files = sum(1 for _ in args.home.rglob("*") if _.is_file())
+    log(f"restored {args.home} from {args.repo_type} repo {args.repo_id} ({args.archive_name}, {restored_files} files)")
     return 0
 
 
@@ -128,18 +137,32 @@ def command_save(args: argparse.Namespace) -> int:
         metadata_path = tmpdir_path / args.metadata_name
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
-        api.create_commit(
-            repo_id=args.repo_id,
-            repo_type=args.repo_type,
-            token=args.token,
-            commit_message=f"Backup OpenClaw state ({args.reason})",
-            operations=[
-                CommitOperationAdd(path_in_repo=args.archive_name, path_or_fileobj=str(archive_path)),
-                CommitOperationAdd(path_in_repo=args.metadata_name, path_or_fileobj=str(metadata_path)),
-            ],
-        )
-        write_hash(args.hash_cache, digest)
-        log(f"uploaded state backup to {args.repo_type} repo {args.repo_id} ({args.archive_name})")
+        # 带重试的上传（指数退避，最多 3 次）
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                api.create_commit(
+                    repo_id=args.repo_id,
+                    repo_type=args.repo_type,
+                    token=args.token,
+                    commit_message=f"Backup OpenClaw state ({args.reason})",
+                    operations=[
+                        CommitOperationAdd(path_in_repo=args.archive_name, path_or_fileobj=str(archive_path)),
+                        CommitOperationAdd(path_in_repo=args.metadata_name, path_or_fileobj=str(metadata_path)),
+                    ],
+                )
+                write_hash(args.hash_cache, digest)
+                log(f"uploaded state backup to {args.repo_type} repo {args.repo_id} ({args.archive_name})")
+                return 0
+            except Exception as exc:
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    log(f"upload attempt {attempt}/{max_retries} failed: {exc}. Retrying in {wait}s...")
+                    import time
+                    time.sleep(wait)
+                else:
+                    log(f"upload failed after {max_retries} attempts: {exc}")
+                    raise
     return 0
 
 

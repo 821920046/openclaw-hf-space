@@ -18,13 +18,10 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
 
-# --- 2b. 自动清理"坏味道"技能和插件 ---
-# 强制清理持久化状态中损坏或不需要的技能/插件目录
-echo "[patch] Deep cleaning broken skills and unused plugins from persistent state..."
-rm -rf "${OPENCLAW_HOME}/.openclaw/workspace/skills/github-api" 2>/dev/null || true
-rm -rf "${OPENCLAW_HOME}/state/npm/node_modules/@clawemail" 2>/dev/null || true
-rm -rf "${OPENCLAW_HOME}/state/extensions/email" 2>/dev/null || true
-find "${OPENCLAW_HOME}" -name "mail-cli" -type d -exec rm -rf {} + 2>/dev/null || true
+# --- 2b. 自动清理已弃用的残留 (保留用户技能) ---
+# 仅清理已知会导致启动崩溃的特定临时文件
+echo "[patch] Cleaning temporary build artifacts..."
+rm -rf "/tmp/openclaw-build-"* 2>/dev/null || true
 
 # --- 3. 变量解析 ---
 export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
@@ -145,12 +142,56 @@ SKILLMD_EOF
   echo "[feishu-doc] feishu-create-doc deployed to /usr/local/bin/ and workspace"
 fi
 
-# --- 3d. 清理旧配置，保护配对状态 ---
-# 从 HF 状态仓库恢复的 openclaw.json 可能包含旧版配置，与新模板冲突。
-# 必须在配置生成（第 5 步）之前清除，让模板重新生成。
-# 但保留 gateway.db 和配对文件，否则 allowlist/pairing 状态丢失。
-echo "[reset] Clearing stale openclaw.json (will be regenerated from template)..."
-rm -f "${OPENCLAW_HOME}/openclaw.json" "${OPENCLAW_HOME}/openclaw.json.bak" 2>/dev/null || true
+# --- 3e. 技能路径标准化与自动初始化 ---
+# 统一使用 ${OPENCLAW_HOME}/workspace/skills 作为唯一技能目录
+export OPENCLAW_SKILLS_DIR="${OPENCLAW_HOME}/workspace/skills"
+mkdir -p "${OPENCLAW_SKILLS_DIR}"
+
+# 如果旧路径 .openclaw/workspace/skills 下有内容，迁移到标准路径
+OLD_SKILLS="${OPENCLAW_HOME}/.openclaw/workspace/skills"
+if [ -d "$OLD_SKILLS" ] && [ "$(ls -A "$OLD_SKILLS" 2>/dev/null)" ]; then
+  echo "[skills] Migrating skills from legacy path to ${OPENCLAW_SKILLS_DIR}..."
+  cp -rn "$OLD_SKILLS/"* "${OPENCLAW_SKILLS_DIR}/" 2>/dev/null || true
+fi
+
+echo "[skills] Skills directory: ${OPENCLAW_SKILLS_DIR}"
+echo "[skills] Scanning for skills to auto-initialize..."
+export PATH="${PATH}:${OPENCLAW_SKILLS_DIR}"
+
+# 特别针对 freeride 的初始化
+FREERIDE_PATH="${OPENCLAW_SKILLS_DIR}/freeride"
+if [ -d "$FREERIDE_PATH" ]; then
+  echo "[skills] freeride found at ${FREERIDE_PATH}, auto-initializing..."
+  rm -f /usr/local/bin/freeride 2>/dev/null || true
+  (cd "$FREERIDE_PATH" && python3 -m pip install --break-system-packages -e . || echo "[skills] freeride install failed")
+  ln -sf "${FREERIDE_PATH}/freeride/cli.py" /usr/local/bin/freeride || true
+  chmod +x "${FREERIDE_PATH}/freeride/cli.py" 2>/dev/null || true
+  if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "[skills] OPENROUTER_API_KEY detected, auto-configuring models via freeride..."
+    (cd "$FREERIDE_PATH" && freeride auto \
+      --primary "openrouter/owl-alpha" \
+      --fallback "google/lyra-3-pro-preview,google/lyra-3-clip-preview,google/gemma-4-26b-a4bit:free,google/gemma-4-31bit:free" \
+      || echo "[skills] freeride auto-config skipped")
+  fi
+  export PATH="${PATH}:${FREERIDE_PATH}"
+fi
+
+# --- 3d. 智能配置保护 ---
+# 不再暴力删除 openclaw.json，改为保存用户自定义段后合并。
+# 保留 gateway.db 和配对文件，否则 allowlist/pairing 状态丢失。
+if [[ "${OPENCLAW_REWRITE_CONFIG_ON_BOOT:-0}" == "1" ]]; then
+  echo "[config] OPENCLAW_REWRITE_CONFIG_ON_BOOT=1 — 强制从模板重新生成全部配置"
+  rm -f "${OPENCLAW_CONFIG_PATH}" "${OPENCLAW_CONFIG_PATH}.bak" 2>/dev/null || true
+else
+  # 保存现有配置，稍后与新模板合并
+  if [[ -f "${OPENCLAW_CONFIG_PATH}" ]]; then
+    echo "[config] 保存现有配置用于合并 (plugins/skills/memory 将被保留)..."
+    cp "${OPENCLAW_CONFIG_PATH}" "${OPENCLAW_CONFIG_PATH}.pre-merge"
+  else
+    echo "[config] 无现有配置，将从模板全新生成"
+  fi
+  rm -f "${OPENCLAW_CONFIG_PATH}" 2>/dev/null || true
+fi
 
 # 全量重置（清除 gateway.db 等）仅在显式请求时执行
 if [[ "${OPENCLAW_RESET_STATE_ON_BOOT:-0}" == "1" ]]; then
@@ -337,15 +378,20 @@ node -e '
 '
 
 # --- 5. 配置文件生成 ---
-echo "[config] Rendering openclaw.json..."
+echo "[config] Rendering openclaw.json from template..."
 template_path="/app/docker/openclaw.template.json"
 export BROWSER_CONTROL_TOKEN="${BROWSER_CONTROL_TOKEN:-openclaw_static_token}"
 export OPENROUTER_API_KEYS="${OPENROUTER_API_KEY:-${OPENROUTER_API_KEYS:-}}"
 
 node -e '
   const fs = require("fs");
+  const path = require("path");
   const template = fs.readFileSync(process.argv[1], "utf8");
   const getEnv = (key, def = "") => process.env[key] || def;
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  const preMergePath = configPath + ".pre-merge";
+
+  // --- 渲染模板 ---
   let cfgRaw = template
     .replace(/\$\{SPACE_HOST\}/g, getEnv("SPACE_HOST"))
     .replace(/\$\{OPENCLAW_DEFAULT_MODEL\}/g, getEnv("OPENCLAW_DEFAULT_MODEL"))
@@ -361,8 +407,11 @@ node -e '
     .replace(/\$\{EMAIL_ENABLED\}/g, getEnv("EMAIL_ENABLED", "false"))
     .replace(/\$\{EMAIL_ACCOUNT\}/g, getEnv("EMAIL_ACCOUNT"))
     .replace(/\$\{EMAIL_TOKEN\}/g, getEnv("EMAIL_TOKEN"))
-    .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"));
+    .replace(/\$\{EMAIL_MODE\}/g, getEnv("EMAIL_MODE", "imap"))
+    .replace(/\$\{OPENCLAW_SKILLS_DIR\}/g, getEnv("OPENCLAW_SKILLS_DIR"));
   let cfg = JSON.parse(cfgRaw);
+
+  // --- 基础设施段（始终从环境变量/模板生成）---
   if (process.env.OPENROUTER_API_KEYS) {
     if (!cfg.models) cfg.models = { mode: "merge", providers: {} };
     cfg.models.providers["openrouter"] = {
@@ -402,12 +451,51 @@ node -e '
       }
     };
   } else {
-    // EMAIL 未启用时，删除模板中的占位配置，避免 schema 校验失败
     if (cfg.channels && cfg.channels.email) {
       delete cfg.channels.email;
     }
   }
-  fs.writeFileSync(process.env.OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+
+  // --- 智能合并：从旧配置恢复用户自定义段 ---
+  if (fs.existsSync(preMergePath)) {
+    try {
+      const old = JSON.parse(fs.readFileSync(preMergePath, "utf8"));
+      // 保留的用户自定义段列表
+      const PRESERVE_KEYS = ["plugins", "skills", "memory", "extensions"];
+      let merged = 0;
+      for (const key of PRESERVE_KEYS) {
+        if (old[key] && Object.keys(old[key]).length > 0) {
+          // 深合并：新配置中该段不存在则直接采用旧的，存在则合并
+          if (!cfg[key] || Object.keys(cfg[key]).length === 0) {
+            cfg[key] = old[key];
+          } else {
+            cfg[key] = { ...old[key], ...cfg[key] };
+          }
+          merged++;
+          console.log("[config] Preserved user section: " + key);
+        }
+      }
+      // agents 段特殊处理：保留 custom agents，但 defaults 由模板控制
+      if (old.agents) {
+        cfg.agents = cfg.agents || {};
+        for (const ak of Object.keys(old.agents)) {
+          if (ak !== "defaults") {
+            cfg.agents[ak] = old.agents[ak];
+            merged++;
+            console.log("[config] Preserved agent config: " + ak);
+          }
+        }
+      }
+      console.log("[config] Smart merge complete: " + merged + " user sections preserved.");
+    } catch (e) {
+      console.log("[config] WARNING: Failed to merge old config: " + e.message);
+    }
+    // 清理临时文件
+    try { fs.unlinkSync(preMergePath); } catch(e) {}
+  }
+
+  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+  console.log("[config] Written to " + configPath);
 ' "${template_path}"
 
 # --- 6. 飞书插件补全 ---
@@ -434,20 +522,91 @@ if [ -f "$REAL_ENTRY" ]; then
   chmod -R 755 "$FEISHU_DIR"
 fi
 
-# --- 7. 启动进程 ---
+# --- 7. 启动进程（带 Watchdog 监控）---
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER:-admin}" "${BASIC_AUTH_PASSWORD:-admin}"
+
+# 日志目录（供 admin_api 读取）
+mkdir -p /tmp/openclaw
+LOG_FILE="/tmp/openclaw/openclaw-$(date +%Y%m%d-%H%M%S).log"
+
+# 启动所有服务并记录 PID
 python3 /app/docker/openrouter_proxy.py &
 proxy_pid=$!
+echo "[startup] openrouter_proxy started (PID: ${proxy_pid})"
+
 cd "${OPENCLAW_REPO_DIR}"
-echo "Starting Gateway..."
-HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured &
+echo "[startup] Starting Gateway..."
+HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured 2>&1 | tee -a "${LOG_FILE}" &
 gateway_pid=$!
+echo "[startup] Gateway started (PID: ${gateway_pid})"
+
 python3 /app/docker/admin_api.py &
+admin_pid=$!
+echo "[startup] admin_api started (PID: ${admin_pid})"
+
 python3 /app/docker/backup_api.py &
+backup_pid=$!
+echo "[startup] backup_api started (PID: ${backup_pid})"
+
 nginx -g "daemon off;" &
 nginx_pid=$!
+echo "[startup] nginx started (PID: ${nginx_pid})"
 
-cleanup() { kill "${gateway_pid}" "${nginx_pid}" "${proxy_pid}" 2>/dev/null || true; exit 0; }
+# 优雅关闭：清理所有子进程
+cleanup() {
+  echo "[shutdown] Cleaning up all processes..."
+  # 关闭前执行状态同步
+  if [[ "${hf_state_enabled}" == "1" ]]; then
+    echo "[shutdown] Performing final state sync..."
+    python3 /app/docker/hf-state-store.py save \
+      --reason shutdown \
+      --home "${OPENCLAW_HOME}" \
+      --repo-id "${OPENCLAW_HF_STATE_REPO}" \
+      --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" || true
+  fi
+  kill "${gateway_pid}" "${nginx_pid}" "${proxy_pid}" "${admin_pid}" "${backup_pid}" 2>/dev/null || true
+  exit 0
+}
 trap cleanup EXIT INT TERM
-wait "${gateway_pid}"
+
+# --- Watchdog：监控子进程健康，自动重启崩溃的服务 ---
+echo "[watchdog] Process monitoring started (interval: 30s)"
+while true; do
+  sleep 30
+
+  # 检查 Gateway（核心进程，崩溃则退出容器让 HF 重启）
+  if ! kill -0 "${gateway_pid}" 2>/dev/null; then
+    echo "[watchdog] CRITICAL: Gateway (PID: ${gateway_pid}) died! Exiting for container restart."
+    cleanup
+  fi
+
+  # 检查 OpenRouter Proxy（可恢复）
+  if ! kill -0 "${proxy_pid}" 2>/dev/null; then
+    echo "[watchdog] openrouter_proxy died, restarting..."
+    python3 /app/docker/openrouter_proxy.py &
+    proxy_pid=$!
+    echo "[watchdog] openrouter_proxy restarted (PID: ${proxy_pid})"
+  fi
+
+  # 检查 Admin API（可恢复）
+  if ! kill -0 "${admin_pid}" 2>/dev/null; then
+    echo "[watchdog] admin_api died, restarting..."
+    python3 /app/docker/admin_api.py &
+    admin_pid=$!
+  fi
+
+  # 检查 Backup API（可恢复）
+  if ! kill -0 "${backup_pid}" 2>/dev/null; then
+    echo "[watchdog] backup_api died, restarting..."
+    python3 /app/docker/backup_api.py &
+    backup_pid=$!
+  fi
+
+  # 检查 Nginx（关键，但通常不会崩溃）
+  if ! kill -0 "${nginx_pid}" 2>/dev/null; then
+    echo "[watchdog] nginx died, restarting..."
+    nginx -g "daemon off;" &
+    nginx_pid=$!
+  fi
+done

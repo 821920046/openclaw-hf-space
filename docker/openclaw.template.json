@@ -45,6 +45,15 @@
       }
     }
   },
+  "plugins": {
+    "slots": {
+      "memory": "basic-memory"
+    }
+  },
+  "skills": {
+    "directory": "${OPENCLAW_SKILLS_DIR}",
+    "autoReload": true
+  },
   "models": {
     "mode": "merge",
     "providers": {
