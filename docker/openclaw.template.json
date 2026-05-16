@@ -51,8 +51,7 @@
     }
   },
   "skills": {
-    "directory": "${OPENCLAW_SKILLS_DIR}",
-    "autoReload": true
+    "entries": {}
   },
   "models": {
     "mode": "merge",
