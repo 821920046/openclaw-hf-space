@@ -1,8 +1,8 @@
 FROM node:24-bookworm AS builder
 
 ARG OPENCLAW_REPO="https://github.com/openclaw/openclaw.git"
-ARG OPENCLAW_REF="v2026.5.3-1"
-ARG OPENCLAW_STABLE_REFRESH="2026-05-05"
+ARG OPENCLAW_REF="v2026.6.1"
+ARG OPENCLAW_STABLE_REFRESH="2026-06-09"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -51,21 +51,13 @@ RUN MAKEFLAGS="-j1" PNPM_CHILD_CONCURRENCY=1 pnpm install \
 
 RUN pnpm rebuild esbuild sharp
 
-# OpenClaw v2026.5.x keeps the control UI in the repository-level ui/ directory.
-# Build the gateway first, then build UI last so dist/control-ui survives dist cleanup.
+# v2026.6.x provides build:docker — serial tsdown→check→postbuild, no
+# build-all.mjs orchestration overhead.  Better for low-memory builds.
 # tsdown-build.mjs auto-detects cgroup memory limits and ignores the
-# NODE_OPTIONS --max-old-space-size we set.  Cap its default to stay within
-# the HF Space builder's constraints (exit 137 = OOMKilled otherwise).
+# NODE_OPTIONS --max-old-space-size we set.  Cap its constant first.
 RUN sed -i 's/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 12288/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 4096/' scripts/tsdown-build.mjs
-RUN test -d ui
-RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm build
-RUN OPENCLAW_CONTROL_UI_BASE_PATH=/openclaw/ NODE_OPTIONS="--max-old-space-size=4096" sh -c '\
-      if pnpm run | grep -q "ui:build"; then \
-        pnpm ui:build; \
-      else \
-        cd ui && pnpm build; \
-      fi \
-    '
+RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm build:docker
+RUN OPENCLAW_CONTROL_UI_BASE_PATH=/openclaw/ NODE_OPTIONS="--max-old-space-size=4096" pnpm ui:build
 
 
 FROM node:24-bookworm-slim AS runtime
