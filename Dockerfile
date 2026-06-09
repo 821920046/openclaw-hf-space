@@ -53,6 +53,10 @@ RUN pnpm rebuild esbuild sharp
 
 # OpenClaw v2026.5.x keeps the control UI in the repository-level ui/ directory.
 # Build the gateway first, then build UI last so dist/control-ui survives dist cleanup.
+# tsdown-build.mjs auto-detects cgroup memory limits and ignores the
+# NODE_OPTIONS --max-old-space-size we set.  Cap its default to stay within
+# the HF Space builder's constraints (exit 137 = OOMKilled otherwise).
+RUN sed -i 's/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 12288/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 4096/' scripts/tsdown-build.mjs
 RUN test -d ui
 RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm build
 RUN OPENCLAW_CONTROL_UI_BASE_PATH=/openclaw/ NODE_OPTIONS="--max-old-space-size=4096" sh -c '\
