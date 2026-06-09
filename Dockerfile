@@ -51,12 +51,12 @@ RUN MAKEFLAGS="-j1" PNPM_CHILD_CONCURRENCY=1 pnpm install \
 
 RUN pnpm rebuild esbuild sharp
 
-# v2026.6.x provides build:docker — serial tsdown→check→postbuild, no
-# build-all.mjs orchestration overhead.  Better for low-memory builds.
-# tsdown-build.mjs auto-detects cgroup memory limits and ignores the
-# NODE_OPTIONS --max-old-space-size we set.  Cap its constant first.
+# tsdown bundles 200+ entry points in one process — memory-heavy.
+# - sed caps DEFAULT_TSDOWN_MAX_OLD_SPACE_MB (tsdown ignores NODE_OPTIONS)
+# - OPENCLAW_RUN_NODE_SKIP_DTS_BUILD=1 skips .d.ts generation that gets
+#   deleted at the end anyway; saves ~30-40% heap during bundling
 RUN sed -i 's/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 12288/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 4096/' scripts/tsdown-build.mjs
-RUN NODE_OPTIONS="--max-old-space-size=4096" pnpm build:docker
+RUN OPENCLAW_RUN_NODE_SKIP_DTS_BUILD=1 NODE_OPTIONS="--max-old-space-size=4096" pnpm build:docker
 RUN OPENCLAW_CONTROL_UI_BASE_PATH=/openclaw/ NODE_OPTIONS="--max-old-space-size=4096" pnpm ui:build
 
 
