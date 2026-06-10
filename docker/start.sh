@@ -509,6 +509,20 @@ node -e '
     try { fs.unlinkSync(preMergePath); } catch(e) {}
   }
 
+  // --- 清理 thinking 配置 (飞书卡片空内容 #272) ---
+  // root cause: 飞书 onPartialReply 用 stripReasoningTagsFromText mode=strict
+  // 把 thinking 块连同内容全剥掉，卡片永远不更新内容。
+  // 从 agents 段递归删除所有 thinking 字段即可根治。
+  (function stripThinking(obj) {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) { obj.forEach(stripThinking); return; }
+    for (const key of Object.keys(obj)) {
+      if (key === "thinking") { delete obj[key]; continue; }
+      stripThinking(obj[key]);
+    }
+  })(cfg);
+  console.log("[config] thinking fields removed from agents config.");
+
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
   console.log("[config] Written to " + configPath);
 ' "${template_path}"
