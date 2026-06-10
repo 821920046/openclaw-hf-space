@@ -509,19 +509,25 @@ node -e '
     try { fs.unlinkSync(preMergePath); } catch(e) {}
   }
 
-  // --- 清理 thinking 配置 (飞书卡片空内容 #272) ---
+  // --- 强制关闭 thinking (飞书卡片空内容 #272) ---
   // root cause: 飞书 onPartialReply 用 stripReasoningTagsFromText mode=strict
   // 把 thinking 块连同内容全剥掉，卡片永远不更新内容。
-  // 从 agents 段递归删除所有 thinking 字段即可根治。
-  (function stripThinking(obj) {
+  // Gateway 解析优先级: agents.defaults.models[x].params.thinking
+  //   → agents.defaults.thinkingDefault → 自动推断 → fallback "medium"
+  // 所以正确的 key 是 agents.defaults.thinkingDefault，不是 model.thinking。
+  if (!cfg.agents) cfg.agents = {};
+  if (!cfg.agents.defaults) cfg.agents.defaults = {};
+  cfg.agents.defaults.thinkingDefault = "off";
+  // 同时递归清理所有 per-model thinking 配置，防止覆盖全局设置
+  (function forceThinkingOff(obj) {
     if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj)) { obj.forEach(stripThinking); return; }
+    if (Array.isArray(obj)) { obj.forEach(forceThinkingOff); return; }
     for (const key of Object.keys(obj)) {
-      if (key === "thinking") { delete obj[key]; continue; }
-      stripThinking(obj[key]);
+      if (key === "thinking" || key === "thinkingDefault") { obj[key] = "off"; continue; }
+      forceThinkingOff(obj[key]);
     }
   })(cfg);
-  console.log("[config] thinking fields removed from agents config.");
+  console.log("[config] thinking forced to 'off' (thinkingDefault + recursive clean).");
 
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
   console.log("[config] Written to " + configPath);
