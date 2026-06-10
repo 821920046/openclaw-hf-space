@@ -425,14 +425,14 @@ node -e '
       apiKey: "dummy_proxy_key",
       api: "openai-completions",
       models: [
-        { id: "google/lyria-3-pro-preview", name: "Google Lyria 3 Pro (Free, 1M ctx)" },
-        { id: "deepseek/deepseek-v4-flash:free", name: "DeepSeek V4 Flash (Free, 1M ctx)" },
-        { id: "google/lyria-3-clip-preview", name: "Google Lyria 3 Clip (Free, 1M ctx)" },
-        { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)" },
-        { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)" },
-        { id: "arcee-ai/trinity-large-thinking:free", name: "Arcee Trinity Thinking (Free, 262K ctx)" },
-        { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)" },
-        { id: "openrouter/owl-alpha", name: "Owl Alpha (Free, 1M ctx)" }
+        { id: "google/lyria-3-pro-preview", name: "Google Lyria 3 Pro (Free, 1M ctx)", params: { thinking: "off" } },
+        { id: "deepseek/deepseek-v4-flash:free", name: "DeepSeek V4 Flash (Free, 1M ctx)", params: { thinking: "off" } },
+        { id: "google/lyria-3-clip-preview", name: "Google Lyria 3 Clip (Free, 1M ctx)", params: { thinking: "off" } },
+        { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)", params: { thinking: "off" } },
+        { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)", params: { thinking: "off" } },
+        { id: "arcee-ai/trinity-large-thinking:free", name: "Arcee Trinity Thinking (Free, 262K ctx)", params: { thinking: "off" } },
+        { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)", params: { thinking: "off" } },
+        { id: "openrouter/owl-alpha", name: "Owl Alpha (Free, 1M ctx)", params: { thinking: "off" } }
       ]
     };
   }
@@ -609,6 +609,17 @@ if [ -f "$REAL_ENTRY" ]; then
   fi
   chmod -R 755 "$FEISHU_DIR"
 fi
+
+# --- 修补飞书插件: stripReasoningTagsFromText mode=strict → keep ---
+# root cause: strict 模式把 thinking 块连同内容全部剥光，导致飞书卡片永远收不到内容更新。
+# 改为 keep 模式后，thinking 内容作为引用块正常显示在卡片中。
+echo "[patch] Patching Feishu plugin to keep reasoning content in streaming cards..."
+for f in $(find "$FEISHU_DIR" -name "*.js" -type f 2>/dev/null); do
+  if grep -q 'stripReasoningTagsFromText.*mode:"strict"' "$f" 2>/dev/null; then
+    sed -i 's/mode:"strict"/mode:"keep"/g' "$f"
+    echo "[patch] Fixed stripReasoningTagsFromText mode in $(basename "$f")"
+  fi
+done
 
 # 强制修复飞书插件 require('root-alias.cjs/...') 子路径问题
 # 旧版飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
