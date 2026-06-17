@@ -610,13 +610,13 @@ if [ -f "$REAL_ENTRY" ]; then
   chmod -R 755 "$FEISHU_DIR"
 fi
 
-# --- 修补飞书插件: stripReasoningTagsFromText mode=strict → keep ---
+# --- 修补飞书插件: stripReasoningTagsFromText mode=strict → preserve ---
 # root cause: strict 模式把 thinking 块连同内容全部剥光，导致飞书卡片永远收不到内容更新。
-# 改为 keep 模式后，thinking 内容作为引用块正常显示在卡片中。
-echo "[patch] Patching Feishu plugin to keep reasoning content in streaming cards..."
+# 改为 preserve 模式后，thinking 内容作为引用块正常显示在卡片中。
+echo "[patch] Patching Feishu plugin to preserve reasoning content in streaming cards..."
 for f in $(find "$FEISHU_DIR" -name "*.js" -type f 2>/dev/null); do
-  if grep -q 'stripReasoningTagsFromText.*mode:"strict"' "$f" 2>/dev/null; then
-    sed -i 's/mode:"strict"/mode:"keep"/g' "$f"
+  if grep -q 'mode: "strict"' "$f" 2>/dev/null; then
+    sed -i 's/mode: "strict"/mode: "preserve"/g' "$f"
     echo "[patch] Fixed stripReasoningTagsFromText mode in $(basename "$f")"
   fi
 done

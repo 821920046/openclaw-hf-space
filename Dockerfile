@@ -1,7 +1,7 @@
 FROM node:24-bookworm AS builder
 
 ARG OPENCLAW_REPO="https://github.com/openclaw/openclaw.git"
-ARG OPENCLAW_REF="v2026.6.1"
+ARG OPENCLAW_REF="v2026.6.5"
 ARG OPENCLAW_STABLE_REFRESH="2026-06-09"
 
 ENV DEBIAN_FRONTEND=noninteractive

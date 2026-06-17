@@ -326,7 +326,7 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 本模板默认使用：
 
 - 仓库：`https://github.com/openclaw/openclaw.git`
-- 引用策略：默认固定到已知可构建的稳定标签（`OPENCLAW_REF=v2026.5.3-1`）
+- 引用策略：默认固定到已知可构建的稳定标签（`OPENCLAW_REF=v2026.6.5`）
 - 缓存刷新提示：`ARG OPENCLAW_STABLE_REFRESH=2026-05-05`
 
 此处的“稳定版”指如下格式的标签：
@@ -340,7 +340,7 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 - `v2026.4.2-beta.1`
 - `v2026.4.2-rc.1`
 
-本仓库目前在 `Dockerfile` 中默认使用 `ARG OPENCLAW_REF="v2026.5.3-1"`。这样可以避免 `stable` 自动跳到刚发布的上游标签后，被 pnpm 的 `minimumReleaseAge` 策略或新依赖变更打断构建。
+本仓库目前在 `Dockerfile` 中默认使用 `ARG OPENCLAW_REF="v2026.6.5"`。这样可以避免 `stable` 自动跳到刚发布的上游标签后，被 pnpm 的 `minimumReleaseAge` 策略或新依赖变更打断构建。
 
 如果你以后想更改版本，请修改 `Dockerfile` 中的 `ARG OPENCLAW_REF=...` 为你想要的准确标签。
 
@@ -360,7 +360,7 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 
 - **选择标签时构建失败**
   - OpenClaw 可能更改了标签命名规则，或者仓库暂时没有可抓取的标签。
-  - 解决方案：在 `Dockerfile` 中固定到一个已知可用的标签（如 `ARG OPENCLAW_REF="v2026.5.3-1"`），不要使用 `stable`。
+  - 解决方案：在 `Dockerfile` 中固定到一个已知可用的标签（如 `ARG OPENCLAW_REF="v2026.6.5"`），不要使用 `stable`。
 
 - **`pnpm install` 或 `pnpm build` 期间构建失败**
   - OpenClaw 可能更改了工作区或构建脚本；如有需要，请回退到已知的正常版本。
