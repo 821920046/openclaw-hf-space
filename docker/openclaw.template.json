@@ -12,7 +12,7 @@
       "enabled": true,
       "basePath": "/openclaw",
       "allowedOrigins": ["*"],
-      "dangerouslyDisableDeviceAuth": true
+      "dangerouslyDisableDeviceAuth": false
     }
   },
   "channels": {
@@ -46,7 +46,15 @@
     }
   },
   "plugins": {
-    "slots": {}
+    "entries": {
+      "feishu": { "enabled": true },
+      "file-transfer": { "enabled": true },
+      "memory-core": { "enabled": true },
+      "talk-voice": { "enabled": true },
+      "browser": { "enabled": false },
+      "canvas": { "enabled": false },
+      "phone-control": { "enabled": false }
+    }
   },
   "skills": {
     "entries": {}

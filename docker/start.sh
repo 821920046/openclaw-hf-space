@@ -18,10 +18,9 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
 
-# --- 2b. 自动清理已弃用的残留 (保留用户技能) ---
-# 仅清理已知会导致启动崩溃的特定临时文件
-echo "[patch] Cleaning temporary build artifacts..."
-rm -rf "/tmp/openclaw-build-"* 2>/dev/null || true
+# --- 2b. 自动清理临时文件 (保留用户技能) ---
+echo "[cleanup] Purging /tmp/* ..."
+rm -rf /tmp/* 2>/dev/null || true
 
 # --- 3. 变量解析 ---
 export FEISHU_APP_ID="${FEISHU_APP_ID:-}"
