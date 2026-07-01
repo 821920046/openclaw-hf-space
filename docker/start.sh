@@ -17,6 +17,9 @@ if [[ -n "${OPENCLAW_HF_STATE_REPO:-}" && -n "${HF_TOKEN:-}" ]]; then
   hf_state_enabled=1
   python3 /app/docker/hf-state-store.py restore --reason boot --home "${OPENCLAW_HOME}" --repo-id "${OPENCLAW_HF_STATE_REPO}" --repo-type dataset || true
 fi
+# [PATCH] 周期性自动备份间隔（秒）。默认 300s=5min；设为 0 关闭。让 OPENCLAW_HF_STATE_SYNC_INTERVAL 真正生效，
+# 不再只赌"优雅关闭"那一下——网页端改动最多 N 秒后即落盘到 HF 数据集，重启不再回滚。
+export OPENCLAW_HF_STATE_SYNC_INTERVAL="${OPENCLAW_HF_STATE_SYNC_INTERVAL:-300}"
 
 # --- 2b. 自动清理临时文件 (保留用户技能) ---
 echo "[cleanup] Purging /tmp/* ..."
@@ -697,7 +700,7 @@ fi
 
 # --- 修补飞书插件: stripReasoningTagsFromText mode=strict → preserve ---
 # root cause: strict 模式把 thinking 块连同内容全部剥光，导致飞书卡片永远收不到内容更新。
-# 改为 preserve 模式后，thinking 内容作为引用块正常显示在卡片中。
+# 改为 preserve 模式后，thinking 内容作为引���块正常显示在卡片中。
 echo "[patch] Patching Feishu plugin to preserve reasoning content in streaming cards..."
 for f in $(find "$FEISHU_DIR" -name "*.js" -type f 2>/dev/null); do
   if grep -q 'mode: "strict"' "$f" 2>/dev/null; then
@@ -872,8 +875,26 @@ trap cleanup EXIT INT TERM
 
 # --- Watchdog：监控子进程健康，自动重启崩溃的服务 ---
 echo "[watchdog] Process monitoring started (interval: 30s)"
+# [PATCH] 周期性状态自动备份初始化
+last_state_sync=$(date +%s)
+echo "[watchdog] Periodic state autosave every ${OPENCLAW_HF_STATE_SYNC_INTERVAL}s (0=disabled)"
 while true; do
   sleep 30
+
+  # [PATCH] 周期性自动备份：每 OPENCLAW_HF_STATE_SYNC_INTERVAL 秒把 ~/.openclaw 落盘到 HF 数据集。
+  # save 自带 sha256 去重（无变化跳过上传，不刷爆提交）；后台执行避免 tar+上传阻塞 gateway 健康检查。
+  if [[ "${hf_state_enabled}" == "1" && "${OPENCLAW_HF_STATE_SYNC_INTERVAL}" -gt 0 ]]; then
+    now_ts=$(date +%s)
+    if (( now_ts - last_state_sync >= OPENCLAW_HF_STATE_SYNC_INTERVAL )); then
+      last_state_sync=$now_ts
+      echo "[watchdog] Triggering periodic state autosave..."
+      ( python3 /app/docker/hf-state-store.py save \
+          --reason autosave \
+          --home "${OPENCLAW_HOME}" \
+          --repo-id "${OPENCLAW_HF_STATE_REPO}" \
+          --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" >> "${LOG_FILE:-/dev/stderr}" 2>&1 || true ) &
+    fi
+  fi
 
   # 检查 Gateway（核心进程，崩溃则退出容器让 HF 重启）
   if ! kill -0 "${gateway_pid}" 2>/dev/null; then

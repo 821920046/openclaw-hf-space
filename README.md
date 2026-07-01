@@ -542,99 +542,174 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 - `siliconflow/THUDM/glm-4-9b-chat`
   - SiliconFlow 免费模型示例中常见的另一个选项。
 
-
 ---
 
-## 优化更新记录（2026-06-30 · 长期免费稳定运行 + 快速模型 + 自动降级）
+## 优化更新记录（2026-07-01 · 六供应商自动降级 + 状态自动备份 + 上下文瘦身）
 
-本节记录针对 "HF 免费层长期运行 / 任务超时 / 模型限流 / 工具调用" 的一系列优化。所有改动均集中在 `docker/start.sh`（渲染脚本），模板 `docker/openclaw.template.json` 保持兼容。
+> 本节取代上一版（2026-06-30）记录，反映当前仓库的最新状态。可控改动集中在 `docker/start.sh`（渲染脚本）与本 README；模板 `docker/openclaw.template.json` 保持兼容。
 
-### 背景：逐层定位的根因
+### TL;DR 当前架构
 
-按第一性原理逐层排查，问题不是单一原因，而是被一层层剥开的：
+- **主模型**：`openrouter/nvidia/nemotron-3-super-120b-a12b:free`（大上下文，扛得住膨胀请求）。
+- **六供应商自动降级链**：OpenRouter → Agnes → SiliconFlow → Gemini → Groq → Cerebras，任一环限流/故障自动切下一环。
+- **状态自动备份**：watchdog 每 `OPENCLAW_HF_STATE_SYNC_INTERVAL` 秒把 `~/.openclaw` 落盘到 HF 数据集，重启不再回滚网页端改动。
+- **上下文瘦身**：插件裁剪 + 技能精简，把单次请求从 ~41K token 压回可用区间。
+- **保活**：外部 Cloudflare Worker 每 30 分钟 ping `/healthz`（`*/30 * * * *`）。
 
-1. **"服务器休眠" 的误解** —— HF 免费 `cpu-basic`（2 vCPU + 16GB RAM）有固定 48h 无活动休眠，但实测真正导致中断的并非休眠，而是下面这条。
-2. **容器被重任务拖垮** —— 像 "今日AI资讯" 这类重任务在 OpenRouter `:free` 共享队列模型上跑得极慢，撞上单任务 5 分钟硬上限（`per-chat task exceeded 300000ms cap`），流式卡片被丢弃，容器随后异常。
-3. **更换 Groq 后的限流** —— 切到 Groq 免费层后，`llama-3.3-70b-versatile` 的 **TPM 仅 12,000**，而单条请求（system + 工具 schema + 记忆 + 历史）固定开销约 **25,000 tokens**，结构性超标 → 每条消息必触发 `413 Request too large`。
-4. **轻量模型的工具调用能力不足** —— 换到 30k TPM 的 `llama-4-scout` 后限流消失，但它在严格 function-calling 上偏弱（调用未注册的 `tavily_search`、或把 `count` 参数传成字符串），被 Groq 严格校验拒绝。最终主模型改用工具调用更强的 `qwen3-32b` / `gpt-oss-120b`。
+### 根因分层（第一性原理逐层剥开）
+
+1. **“服务器休眠”的误解** —— HF 免费 `cpu-basic`（2 vCPU + 16GB）有 48h 无活动休眠，但真正导致中断的不是休眠。
+2. **容器被重任务拖垮** —— 重任务在 OpenRouter `:free` 共享队列上极慢，撞 5 分钟硬上限（`per-chat task exceeded 300000ms cap`）后容器异常。
+3. **Groq TPM 结构性超标** —— Groq 免费层 `qwen3-32b` 实测**仅 6,000 TPM**，单条请求固定开销远超它 → 只要 Groq 当主模型就必然 `413 Request too large`。**结论：Groq 永远不能当主模型，只能做靠后兜底。**
+4. **死链模型** —— `openrouter/owl-alpha`、`deepseek/deepseek-v4-flash:free` 均已 404 下线，曾导致 19 把 OpenRouter key 全打空。已从模型列表清除。
+5. **音频模型误用（致命 bug）** —— 旧默认主模型 `google/lyria-3-pro-preview` 是**音频/音乐生成模型，不能对话**，是首消息 “All models failed” 的元凶之一。已改为 nemotron-super，并从 OpenRouter 列表删除 lyria 系。
+6. **技能 schema 膨胀（真正的大头）** —— 每个“启用”的插件/技能，其完整工具 schema 会在**每次请求**被原样注入，用不用都发。实测一句“你会干什么”曾达 **41,077 token**。这是限流与配额消耗主因，**加再多供应商也治不了，只能精简技能**。
+7. **持久化读写不对称** —— 开机 restore 是**无条件破坏性**的（先删后解压快照）；而 save 原本只在“优雅关闭”触发，HF 免费层常硬杀 → 网页端改动没上传就被重启回滚。已加周期自动备份修复。
+8. **后台自主运行空烧配额** —— `OPENCLAW_AGENTS_DREAMING_*`（引擎原生“做梦/空闲自主运行”）会让 agent 无人时自己在后台跑，白烧模型额度。建议关闭。
 
 ### `docker/start.sh` 的具体改动
 
-1. **freeride 尊重 `OPENCLAW_DEFAULT_MODEL`**
-   - 原脚本在检测到 `OPENROUTER_API_KEY` 时会无条件 `freeride auto --primary openrouter/owl-alpha`，**静默覆盖**用户设置的主模型。
-   - 现改为 `--primary "${OPENCLAW_DEFAULT_MODEL:-openrouter/owl-alpha}"`，并把 owl-alpha 等免费模型退为 `--fallback` 兜底。
+1. **修复音频模型致命 bug**：默认主模型从 `google/lyria-3-pro-preview` 改为 `openrouter/nvidia/nemotron-3-super-120b-a12b:free`。
+2. **注入 OpenAI 兼容供应商**（仅当对应 key 存在时进配置）：`openrouter`（经本地 `openrouter_proxy.py` 轮换 19 把 key，`127.0.0.1:18780`）、`agnes`（`https://apihub.agnes-ai.com/v1`，模型 `agnes-2.0-flash` 256K / `agnes-1.5-flash`）、`siliconflow`、`gemini`、`groq`、`cerebras`、`dashscope`。
+3. **OpenRouter 模型列表清死链**：删除 lyria 系（音频）、`deepseek-v4-flash:free`、`owl-alpha`（404/误用），改用 nemotron-super / gemma-4 系 / qwen3-coder / gpt-oss-120b 等仍有效免费款。
+4. **freeride 尊重 `OPENCLAW_DEFAULT_MODEL`**：不再无条件把主模型覆盖成 owl-alpha。
+5. **自动降级 fallback 链**：主模型遇限流/超时/故障自动切下一环，不再 `next=none` 直接报死。可用 `OPENCLAW_FALLBACKS` 覆盖。
+6. **按需插件裁剪 `OPENCLAW_DISABLE_PLUGINS`**：配置合并后把指定插件置 `enabled:false`。安全可禁 `file-transfer`、`talk-voice`；**切勿禁** `acpx`/`device-pair`/`feishu`/`memory-core`。
+7. **【新】周期性状态自动备份**：watchdog 循环内每 `OPENCLAW_HF_STATE_SYNC_INTERVAL` 秒调用 `hf-state-store.py save`（后台执行、sha256 去重、无变化跳过上传），让持久化不再只赌优雅关闭。
 
-2. **注入快速免费提供商（OpenAI 兼容接口，按环境变量启用）**
-   - 在渲染脚本中按需注入以下 provider（仅当对应 key 存在时）：
-     - **groq** `https://api.groq.com/openai/v1`，模型列表为 **未被弃用且 30k TPM** 的款：
-       `meta-llama/llama-4-scout-17b-16e-instruct`、`qwen/qwen3-32b`、`openai/gpt-oss-120b`、`openai/gpt-oss-20b`
-       （注意 `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` 已被 Groq 宣布 2026-08-16 下线，故不再使用）
-     - **cerebras** `https://api.cerebras.ai/v1`
-     - **gemini** `https://generativelanguage.googleapis.com/v1beta/openai/`，模型 `gemini-2.5-flash`、`gemini-2.0-flash-lite`
-   - 模板中已内置 **siliconflow**（硅基流动）与 **dashscope**（通义千问）两个国内直连 provider，只需补 key。
+### 六供应商自动降级链（当前生效顺序）
 
-3. **自动降级 fallback 链**
-   - 在写盘前注入 `agents.defaults.model.fallbacks`，主模型遇限流/超时/provider 故障时**自动切换**到下一个，避免直接报死（此前 `next=none`）。
-   - 当前顺序（仅在对应 key 存在时进链）：
-     **Gemini Flash → SiliconFlow 硅基流动 → OpenRouter(免费 owl-alpha)**
-   - 注意：工具调用校验失败属于 "应用层不可重试错误"，**不触发** fallback；这类问题需通过更强的主模型解决。
+| 顺序 | 模型 | 供应商 | 角色 |
+| --- | --- | --- | --- |
+| 主 | `nvidia/nemotron-3-super-120b-a12b:free` | OpenRouter | 主模型（大上下文）|
+| 1 | `google/gemma-4-31b-it:free` | OpenRouter | 兜底 |
+| 2 | `agnes-2.0-flash` | Agnes | 兜底（256K 上下文）|
+| 3 | `Qwen/Qwen3-8B` | SiliconFlow | 兜底（国内直连）|
+| 4 | `gemini-2.5-flash` | Gemini | 兜底 |
+| 5 | `qwen/qwen3-32b` | Groq | 兜底（仅 6K TPM，靠后）|
+| 6 | `llama-3.3-70b` | Cerebras | 兜底 |
 
-4. **按需插件裁剪开关 `OPENCLAW_DISABLE_PLUGINS`**
-   - 新增环境变量（逗号分隔），在配置合并后把指定插件置为 `enabled:false`，用于压缩每次请求的上下文体积（工具 schema 是大头）。
-   - **安全可禁**：`file-transfer`、`talk-voice`。**切勿禁用** `acpx`（agent 运行时后端）、`device-pair`（配对核心）、`feishu`（消息通道）、`memory-core`（记忆，若禁会丢记忆）。
+### HF Space 环境变量完整清单（Settings → Variables and secrets）
 
-### 新增 / 变更的环境变量
+> 已逐个核对每个变量在代码中的真实消费点。分四类：**必留 / 需改 / 建议关 / 可删**。
+
+#### 🟢 基础设施（必留）
+
+| 变量 | 类型 | 意义 |
+| --- | --- | --- |
+| `HF_TOKEN` | Secret | HF 写权限令牌，状态备份/恢复必需 |
+| `OPENCLAW_HF_STATE_REPO` | Secret | 状态数据集仓库 ID（`用户名/仓库名`），持久化落点 |
+| `OPENCLAW_HF_STATE_REPO_TYPE` | Secret | 仓库类型，默认 `dataset`（可省）|
+| `OPENCLAW_HF_STATE_SYNC_INTERVAL` | Secret | 周期自动备份间隔（秒），默认 `300`，设 `0` 关闭 |
+| `BASIC_AUTH_USER` | Secret | `/openclaw` 控制台登录名 |
+| `BASIC_AUTH_PASSWORD` | Secret | 控制台登录密码 |
+
+#### 🟢 飞书通道（必留）
+
+| 变量 | 类型 | 意义 |
+| --- | --- | --- |
+| `FEISHU_APP_ID` | Secret | 飞书应用 ID |
+| `FEISHU_APP_SECRET` | Secret | 飞书应用密钥 |
+| `FEISHU_DOMAIN` | Secret | `feishu`（默认）或国际版 `lark` |
+| `FEISHU_ALLOW_FROM` | Secret | 允许私聊的 open_id 白名单（逗号分隔）|
+| `FEISHU_DM_POLICY` | Secret | 私聊策略；有白名单时自动 `allowlist` |
+
+#### 🟢 模型供应商密钥（按六供应商保留）
+
+| 变量 | 类型 | 供应商 |
+| --- | --- | --- |
+| `OPENROUTER_API_KEYS` | Secret | OpenRouter（逗号分隔多把，19 把轮换，现主力）|
+| `AGNES_API_KEY` | Secret | Agnes（`sk-` 开头，不带 Bearer）|
+| `SILICONFLOW_API_KEY` | Secret | 硅基流动 |
+| `GEMINI_API_KEY` | Secret | Google Gemini |
+| `GROQ_API_KEY` | Secret | Groq（`gsk_` 开头；是 Gro**q** 不是 Gro**k**）|
+| `CEREBRAS_API_KEY` | Secret | Cerebras |
+| `DASHSCOPE_API_KEY` | Secret | 阿里通义/百炼（可选第 7 家，未设则跳过）|
+
+#### 🟠 配置控制
 
 | 变量 | 类型 | 说明 |
 | --- | --- | --- |
-| `OPENCLAW_DEFAULT_MODEL` | Variable | 主模型。推荐 `groq/qwen/qwen3-32b`（30k TPM + 工具调用稳）或 `groq/openai/gpt-oss-120b` |
-| `GROQ_API_KEY` | Secret | Groq（console.groq.com，`gsk_` 开头）。注意是 Gro**q** 不是 Gro**k** |
-| `GEMINI_API_KEY` | Secret | Google Gemini（aistudio.google.com，拿 key 可能需科学上网，但服务器调用不受影响） |
-| `SILICONFLOW_API_KEY` | Secret | 硅基流动（cloud.siliconflow.cn，国内直连） |
-| `OPENROUTER_API_KEY` | Secret | OpenRouter 免费兜底（owl-alpha 走此 key） |
-| `OPENCLAW_DISABLE_PLUGINS` | Variable | 逗号分隔的禁用插件名，建议 `file-transfer,talk-voice` |
+| `OPENCLAW_DEFAULT_MODEL` | Variable | **主模型。务必设为 `openrouter/nvidia/nemotron-3-super-120b-a12b:free` 或直接删除走默认；切勿设成 `groq/...`（6K TPM 必 413）** |
+| `OPENCLAW_DISABLE_PLUGINS` | Variable | 逗号分隔禁用插件，建议 `file-transfer,talk-voice` |
+| `OPENCLAW_REWRITE_CONFIG_ON_BOOT` | Secret | 保持 `0`/不设；设 `1` 会强制模板覆盖、抹掉技能与记忆 |
+| `OPENCLAW_RESET_STATE_ON_BOOT` | Secret | 保持 `0`；设 `1` 清空运行态（仅排障临时用）|
 
-### 推荐配置（HF Space → Settings → Variables and secrets）
+#### 🔴 建议关闭（后台空烧配额元凶）
+
+| 变量 | 建议值 | 说明 |
+| --- | --- | --- |
+| `OPENCLAW_AGENTS_DREAMING_ENABLED` | `false` | 引擎原生“空闲自主运行/做梦”，免费层无需，关掉省配额 |
+| `OPENCLAW_AGENTS_DREAMING_MODEL` | 可删 | 关闭 dreaming 后失去意义 |
+
+#### 🗑️ 无用残留（建议删除，代码已不消费）
+
+| 变量 | 原因 |
+| --- | --- |
+| `MODAL_BASE_URL` / `MODAL_API_KEY` / `MODAL_MODELS_JSON` | 旧 Modal 供应商，当前模型链未接入 |
+| `OPENROUTER_MODELS_JSON` | OpenRouter 模型列表已写死在 `start.sh`，此变量不再消费 |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | 无 GitHub 类技能使用 |
+
+### 技能精简方案（第一性原理）
+
+单次请求 token = 系统提示 + Σ（启用插件工具 schema）+ Σ（启用技能工具 schema）+ 累积历史。**每个启用的技能都会把完整工具说明书注入每一次请求，用不用都发。** 判据：这台飞书聊天机器人是否真的会调用它，不会就关。
+
+- **保留**：`feishu-doc` / `feishu-drive` / `feishu-perm` / `feishu-wiki`（飞书本职）、按需 `notion` / `weather`。
+- **建议在网页端 Skills 页关闭**（对聊天机器人是纯上下文税）：`taskflow`、`taskflow-inbox-triage`、`acp-router`、`coding-agent`、`skill-creator`、`spike`、`python-debugpy`、`node-inspect-debugger`、`node-connect`、`healthcheck`、`canvas`、`meme-maker`、`diagram-maker` 等一切开发/运维/演示类技能。
+- 其余大量默认已禁用的技能保持即可。
+- 注意：技能开关存于运行态，**改完需等一次自动备份落盘（或手动访问 `/api/backup`）再重启**，否则会被旧快照回滚。
+
+### 推荐配置
 
 ```
-OPENCLAW_DEFAULT_MODEL   = groq/qwen/qwen3-32b
+# —— 主模型与瘦身 ——
+OPENCLAW_DEFAULT_MODEL   = openrouter/nvidia/nemotron-3-super-120b-a12b:free
 OPENCLAW_DISABLE_PLUGINS = file-transfer,talk-voice
+OPENCLAW_AGENTS_DREAMING_ENABLED = false
+
+# —— 状态持久化 ——
+HF_TOKEN                        = hf_...
+OPENCLAW_HF_STATE_REPO          = <用户名>/openclaw-state
+OPENCLAW_HF_STATE_SYNC_INTERVAL = 300
+
+# —— 六供应商密钥（按需）——
+OPENROUTER_API_KEYS = sk-or-...,sk-or-...   # 多把逗号分隔
+AGNES_API_KEY       = sk-...
+SILICONFLOW_API_KEY = sk-...
+GEMINI_API_KEY      = ...
 GROQ_API_KEY        = gsk_...
-GEMINI_API_KEY      = ...        # 可选，进 fallback 第 1 环
-SILICONFLOW_API_KEY = sk-...     # 可选，进 fallback 第 2 环
-OPENROUTER_API_KEY  = ...        # 可选，进 fallback 兜底
+CEREBRAS_API_KEY    = csk-...
+
+# —— 控制台与飞书 ——
+BASIC_AUTH_USER     = admin
+BASIC_AUTH_PASSWORD = <强密码>
+FEISHU_APP_ID       = cli_...
+FEISHU_APP_SECRET   = ...
+FEISHU_ALLOW_FROM   = ou_xxx
 ```
 
-配套：在外部用 Cloudflare Worker（或其它定时器）每 30 分钟请求一次 `/healthz` 保活，cron 例：`*/30 * * * *`。
+外部保活：Cloudflare Worker 每 30 分钟 ping 一次 `/healthz`，cron `*/30 * * * *`（**这是保活，勿改成更长间隔，否则容器会休眠**；与状态备份是两套独立机制）。
 
 ### 部署步骤
 
-1. 用本仓库的 `docker/start.sh` 覆盖 HF Space 中的同名文件并提交（触发重建）。
-2. 在 Settings 中按上表配置变量与 Secret。
-3. Restart this Space，等状态变 Running。
+1. 用本仓库最新的 `docker/start.sh` 覆盖 HF Space 同名文件并提交（触发重建）。
+2. 按上表配置/清理 Variables 与 Secrets。
+3. Restart Space，等状态变 Running。
+4. 在 `/openclaw/` 控制台 Skills 页关闭无用技能 → 等自动备份或手动 `/api/backup` → 再重启。
 
 ### 验证（重启后看 Logs）
 
-启动日志应依次出现：
-
-```
-[config] fallback chain set: gemini/gemini-2.5-flash -> siliconflow/Qwen/Qwen2-7B-Instruct -> openrouter/owl-alpha
-[config] plugin disabled via OPENCLAW_DISABLE_PLUGINS: file-transfer
-[config] plugin disabled via OPENCLAW_DISABLE_PLUGINS: talk-voice
-[gateway] agent model: groq/qwen/qwen3-32b (thinking=off, fast=off)
-[gateway] http server listening (4 plugins: acpx, device-pair, feishu, memory-core; ...)
-```
-
-- 不应再出现 `413 Request too large ... Limit 12000`（已换 30k TPM 模型 + 裁剪上下文）。
-- 调用搜索类技能不应再出现 `tool call validation failed`（已换工具调用更强的主模型）。
+- 首行 `requested=` 应为 `openrouter/nvidia/nemotron-...`，**不再出现 `groq/...` 的 413**。
+- 出现 `[watchdog] Periodic state autosave every 300s` 与周期性 `Triggering periodic state autosave...`。
+- 一句简单消息的 `Requested xxxxx` token 数应显著低于 41K（关技能后）。
 
 ### 故障对照表
 
 | 现象 | 根因 | 处理 |
 | --- | --- | --- |
-| `per-chat task exceeded 300000ms cap`，卡片被丢弃 | 重任务在慢的免费模型上超 5 分钟硬上限 | 换 Groq 快模型；保活；瘦身 |
-| `413 Request too large ... TPM Limit 12000` | 单请求 ~25k > Groq 免费层 12k TPM | 换 30k TPM 模型（scout/qwen3-32b/gpt-oss）+ `OPENCLAW_DISABLE_PLUGINS` |
-| 改了 `OPENCLAW_DEFAULT_MODEL` 仍是 owl-alpha | freeride 无条件覆盖主模型 | 使用本补丁版 start.sh，或临时删除 `OPENROUTER_API_KEY` |
-| `tool call validation failed: tavily_search not in request.tools` | 技能引用了未注册的工具，且轻量模型工具调用弱 | 主模型换 qwen3-32b/gpt-oss-120b；检查技能里写死的 `tavily_search`，改用 `web_search` |
-| `tool ... /count: expected number, but got string` | 轻量模型生成的参数类型不合 schema | 同上，换工具调用更强的主模型 |
-| 限流时直接报错、不切换 | 未配置 fallback（`next=none`） | 本补丁已注入 fallback 链；为各环补齐对应 key |
+| `413 Request too large ... Limit 6000` | Groq 免费层仅 6K TPM，被当主模型 | 主模型改 nemotron；Groq 退为靠后兜底 |
+| 首消息 `All models failed` | 主模型是音频模型 lyria / 指向死链 owl-alpha、deepseek:free | 用本版 start.sh（已清死链、改 nemotron）|
+| 单请求 token 高达 ~41K | 启用技能过多，schema 全量注入 | 网页端关无用技能 + `OPENCLAW_DISABLE_PLUGINS` |
+| 网页端改了技能，重启又变回 | 改动未上传就被开机 restore 回滚 | 已加周期自动备份；改完等落盘或手动 `/api/backup` 再重启 |
+| 后台无人时仍在消耗配额 | `OPENCLAW_AGENTS_DREAMING_ENABLED` 开着 | 设为 `false` |
+| `per-chat task exceeded 300000ms cap` | 重任务在慢模型上超 5 分钟 | 用快主模型；保活；瘦身 |
