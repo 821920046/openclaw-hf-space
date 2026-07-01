@@ -542,3 +542,99 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
 - `siliconflow/THUDM/glm-4-9b-chat`
   - SiliconFlow 免费模型示例中常见的另一个选项。
 
+
+---
+
+## 优化更新记录（2026-06-30 · 长期免费稳定运行 + 快速模型 + 自动降级）
+
+本节记录针对 "HF 免费层长期运行 / 任务超时 / 模型限流 / 工具调用" 的一系列优化。所有改动均集中在 `docker/start.sh`（渲染脚本），模板 `docker/openclaw.template.json` 保持兼容。
+
+### 背景：逐层定位的根因
+
+按第一性原理逐层排查，问题不是单一原因，而是被一层层剥开的：
+
+1. **"服务器休眠" 的误解** —— HF 免费 `cpu-basic`（2 vCPU + 16GB RAM）有固定 48h 无活动休眠，但实测真正导致中断的并非休眠，而是下面这条。
+2. **容器被重任务拖垮** —— 像 "今日AI资讯" 这类重任务在 OpenRouter `:free` 共享队列模型上跑得极慢，撞上单任务 5 分钟硬上限（`per-chat task exceeded 300000ms cap`），流式卡片被丢弃，容器随后异常。
+3. **更换 Groq 后的限流** —— 切到 Groq 免费层后，`llama-3.3-70b-versatile` 的 **TPM 仅 12,000**，而单条请求（system + 工具 schema + 记忆 + 历史）固定开销约 **25,000 tokens**，结构性超标 → 每条消息必触发 `413 Request too large`。
+4. **轻量模型的工具调用能力不足** —— 换到 30k TPM 的 `llama-4-scout` 后限流消失，但它在严格 function-calling 上偏弱（调用未注册的 `tavily_search`、或把 `count` 参数传成字符串），被 Groq 严格校验拒绝。最终主模型改用工具调用更强的 `qwen3-32b` / `gpt-oss-120b`。
+
+### `docker/start.sh` 的具体改动
+
+1. **freeride 尊重 `OPENCLAW_DEFAULT_MODEL`**
+   - 原脚本在检测到 `OPENROUTER_API_KEY` 时会无条件 `freeride auto --primary openrouter/owl-alpha`，**静默覆盖**用户设置的主模型。
+   - 现改为 `--primary "${OPENCLAW_DEFAULT_MODEL:-openrouter/owl-alpha}"`，并把 owl-alpha 等免费模型退为 `--fallback` 兜底。
+
+2. **注入快速免费提供商（OpenAI 兼容接口，按环境变量启用）**
+   - 在渲染脚本中按需注入以下 provider（仅当对应 key 存在时）：
+     - **groq** `https://api.groq.com/openai/v1`，模型列表为 **未被弃用且 30k TPM** 的款：
+       `meta-llama/llama-4-scout-17b-16e-instruct`、`qwen/qwen3-32b`、`openai/gpt-oss-120b`、`openai/gpt-oss-20b`
+       （注意 `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` 已被 Groq 宣布 2026-08-16 下线，故不再使用）
+     - **cerebras** `https://api.cerebras.ai/v1`
+     - **gemini** `https://generativelanguage.googleapis.com/v1beta/openai/`，模型 `gemini-2.5-flash`、`gemini-2.0-flash-lite`
+   - 模板中已内置 **siliconflow**（硅基流动）与 **dashscope**（通义千问）两个国内直连 provider，只需补 key。
+
+3. **自动降级 fallback 链**
+   - 在写盘前注入 `agents.defaults.model.fallbacks`，主模型遇限流/超时/provider 故障时**自动切换**到下一个，避免直接报死（此前 `next=none`）。
+   - 当前顺序（仅在对应 key 存在时进链）：
+     **Gemini Flash → SiliconFlow 硅基流动 → OpenRouter(免费 owl-alpha)**
+   - 注意：工具调用校验失败属于 "应用层不可重试错误"，**不触发** fallback；这类问题需通过更强的主模型解决。
+
+4. **按需插件裁剪开关 `OPENCLAW_DISABLE_PLUGINS`**
+   - 新增环境变量（逗号分隔），在配置合并后把指定插件置为 `enabled:false`，用于压缩每次请求的上下文体积（工具 schema 是大头）。
+   - **安全可禁**：`file-transfer`、`talk-voice`。**切勿禁用** `acpx`（agent 运行时后端）、`device-pair`（配对核心）、`feishu`（消息通道）、`memory-core`（记忆，若禁会丢记忆）。
+
+### 新增 / 变更的环境变量
+
+| 变量 | 类型 | 说明 |
+| --- | --- | --- |
+| `OPENCLAW_DEFAULT_MODEL` | Variable | 主模型。推荐 `groq/qwen/qwen3-32b`（30k TPM + 工具调用稳）或 `groq/openai/gpt-oss-120b` |
+| `GROQ_API_KEY` | Secret | Groq（console.groq.com，`gsk_` 开头）。注意是 Gro**q** 不是 Gro**k** |
+| `GEMINI_API_KEY` | Secret | Google Gemini（aistudio.google.com，拿 key 可能需科学上网，但服务器调用不受影响） |
+| `SILICONFLOW_API_KEY` | Secret | 硅基流动（cloud.siliconflow.cn，国内直连） |
+| `OPENROUTER_API_KEY` | Secret | OpenRouter 免费兜底（owl-alpha 走此 key） |
+| `OPENCLAW_DISABLE_PLUGINS` | Variable | 逗号分隔的禁用插件名，建议 `file-transfer,talk-voice` |
+
+### 推荐配置（HF Space → Settings → Variables and secrets）
+
+```
+OPENCLAW_DEFAULT_MODEL   = groq/qwen/qwen3-32b
+OPENCLAW_DISABLE_PLUGINS = file-transfer,talk-voice
+GROQ_API_KEY        = gsk_...
+GEMINI_API_KEY      = ...        # 可选，进 fallback 第 1 环
+SILICONFLOW_API_KEY = sk-...     # 可选，进 fallback 第 2 环
+OPENROUTER_API_KEY  = ...        # 可选，进 fallback 兜底
+```
+
+配套：在外部用 Cloudflare Worker（或其它定时器）每 30 分钟请求一次 `/healthz` 保活，cron 例：`*/30 * * * *`。
+
+### 部署步骤
+
+1. 用本仓库的 `docker/start.sh` 覆盖 HF Space 中的同名文件并提交（触发重建）。
+2. 在 Settings 中按上表配置变量与 Secret。
+3. Restart this Space，等状态变 Running。
+
+### 验证（重启后看 Logs）
+
+启动日志应依次出现：
+
+```
+[config] fallback chain set: gemini/gemini-2.5-flash -> siliconflow/Qwen/Qwen2-7B-Instruct -> openrouter/owl-alpha
+[config] plugin disabled via OPENCLAW_DISABLE_PLUGINS: file-transfer
+[config] plugin disabled via OPENCLAW_DISABLE_PLUGINS: talk-voice
+[gateway] agent model: groq/qwen/qwen3-32b (thinking=off, fast=off)
+[gateway] http server listening (4 plugins: acpx, device-pair, feishu, memory-core; ...)
+```
+
+- 不应再出现 `413 Request too large ... Limit 12000`（已换 30k TPM 模型 + 裁剪上下文）。
+- 调用搜索类技能不应再出现 `tool call validation failed`（已换工具调用更强的主模型）。
+
+### 故障对照表
+
+| 现象 | 根因 | 处理 |
+| --- | --- | --- |
+| `per-chat task exceeded 300000ms cap`，卡片被丢弃 | 重任务在慢的免费模型上超 5 分钟硬上限 | 换 Groq 快模型；保活；瘦身 |
+| `413 Request too large ... TPM Limit 12000` | 单请求 ~25k > Groq 免费层 12k TPM | 换 30k TPM 模型（scout/qwen3-32b/gpt-oss）+ `OPENCLAW_DISABLE_PLUGINS` |
+| 改了 `OPENCLAW_DEFAULT_MODEL` 仍是 owl-alpha | freeride 无条件覆盖主模型 | 使用本补丁版 start.sh，或临时删除 `OPENROUTER_API_KEY` |
+| `tool call validation failed: tavily_search not in request.tools` | 技能引用了未注册的工具，且轻量模型工具调用弱 | 主模型换 qwen3-32b/gpt-oss-120b；检查技能里写死的 `tavily_search`，改用 `web_search` |
+| `tool ... /count: expected number, but got string` | 轻量模型生成的参数类型不合 schema | 同上，换工具调用更强的主模型 |
+| 限流时直接报错、不切换 | 未配置 fallback（`next=none`） | 本补丁已注入 fallback 链；为各环补齐对应 key |

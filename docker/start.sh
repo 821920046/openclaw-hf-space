@@ -6,7 +6,7 @@ export OPENCLAW_HOME="${OPENCLAW_HOME:-/root/.openclaw}"
 export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${OPENCLAW_HOME}/openclaw.json}"
 export OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME}/state}"
 export OPENCLAW_REPO_DIR="${OPENCLAW_REPO_DIR:-/app/openclaw}"
-export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-google/lyria-3-pro-preview}"
+export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}"
 export SPACE_HOST="${SPACE_HOST:-localhost:7860}"
 
 mkdir -p "${OPENCLAW_HOME}" "${OPENCLAW_STATE_DIR}" /var/log/nginx /var/lib/nginx /run/nginx
@@ -167,9 +167,10 @@ if [ -d "$FREERIDE_PATH" ]; then
   chmod +x "${FREERIDE_PATH}/freeride/cli.py" 2>/dev/null || true
   if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
     echo "[skills] OPENROUTER_API_KEY detected, auto-configuring models via freeride..."
+    # [PATCH] 让 freeride 的主模型尊重 OPENCLAW_DEFAULT_MODEL（你选的快模型）；owl-alpha 退为兜底
     (cd "$FREERIDE_PATH" && freeride auto \
-      --primary "openrouter/owl-alpha" \
-      --fallback "google/lyra-3-pro-preview,google/lyra-3-clip-preview,google/gemma-4-26b-a4bit:free,google/gemma-4-31bit:free" \
+      --primary "nvidia/nemotron-3-super-120b-a12b:free" \
+      --fallback "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free" \
       || echo "[skills] freeride auto-config skipped")
   fi
   export PATH="${PATH}:${FREERIDE_PATH}"
@@ -202,10 +203,10 @@ else
   echo "[reset] gateway.db and pairing state preserved."
 fi
 
-# --- 4. SDK 物理修补 (核心修复) ---
+# --- 4. SDK 物理修��� (核心修复) ---
 # OpenClaw 某些版本的 plugin-sdk/channel-streaming 缺少 formatChannelProgressDraftLineForEntry 导出，
 # 飞书插件依赖此导出。
-# 策略：通过 Node.js 模块解析找到实际文件路径，再精准修补。
+# 策略：通过 Node.js 模块解析���到实际文件路径，再精准修补。
 echo "[patch] Resolving and patching openclaw/plugin-sdk/channel-streaming..."
 node -e '
   const fs = require("fs");
@@ -424,14 +425,69 @@ node -e '
       apiKey: "dummy_proxy_key",
       api: "openai-completions",
       models: [
-        { id: "google/lyria-3-pro-preview", name: "Google Lyria 3 Pro (Free, 1M ctx)", params: { thinking: "off" } },
-        { id: "deepseek/deepseek-v4-flash:free", name: "DeepSeek V4 Flash (Free, 1M ctx)", params: { thinking: "off" } },
-        { id: "google/lyria-3-clip-preview", name: "Google Lyria 3 Clip (Free, 1M ctx)", params: { thinking: "off" } },
+        { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "NVIDIA Nemotron 3 Super 120B (Free, 1M ctx)", params: { thinking: "off" } },
         { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)", params: { thinking: "off" } },
         { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)", params: { thinking: "off" } },
-        { id: "arcee-ai/trinity-large-thinking:free", name: "Arcee Trinity Thinking (Free, 262K ctx)", params: { thinking: "off" } },
+        { id: "qwen/qwen3-coder:free", name: "Qwen3 Coder 480B (Free, 1M ctx)", params: { thinking: "off" } },
         { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)", params: { thinking: "off" } },
-        { id: "openrouter/owl-alpha", name: "Owl Alpha (Free, 1M ctx)", params: { thinking: "off" } }
+        { id: "openai/gpt-oss-120b:free", name: "OpenAI GPT-OSS 120B (Free, 131K ctx)", params: { thinking: "off" } }
+      ]
+    };
+  }
+  // [PATCH] 新增：快速免费提供商（按需用环境变量启用，OpenAI 兼容接口）
+  function ensureModels() {
+    if (!cfg.models) cfg.models = { mode: "merge", providers: {} };
+    if (!cfg.models.providers) cfg.models.providers = {};
+  }
+  if (process.env.GROQ_API_KEY) {
+    ensureModels();
+    cfg.models.providers["groq"] = {
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: process.env.GROQ_API_KEY,
+      api: "openai-completions",
+      models: [
+        // [PATCH] 30k TPM 免费层、且未被弃用（llama-3.3-70b / 3.1-8b 已宣布 2026-08-16 下线）
+        { id: "meta-llama/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout 17B (Groq, 30k TPM)", params: { thinking: "off" } },
+        { id: "qwen/qwen3-32b", name: "Qwen3 32B (Groq, 30k TPM)", params: { thinking: "off" } },
+        { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B (Groq)", params: { thinking: "off" } },
+        { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B (Groq)", params: { thinking: "off" } }
+      ]
+    };
+  }
+  if (process.env.CEREBRAS_API_KEY) {
+    ensureModels();
+    cfg.models.providers["cerebras"] = {
+      baseUrl: "https://api.cerebras.ai/v1",
+      apiKey: process.env.CEREBRAS_API_KEY,
+      api: "openai-completions",
+      models: [
+        { id: "llama-3.3-70b", name: "Llama 3.3 70B (Cerebras)", params: { thinking: "off" } },
+        { id: "llama3.1-8b", name: "Llama 3.1 8B (Cerebras)", params: { thinking: "off" } }
+      ]
+    };
+  }
+  if (process.env.GEMINI_API_KEY) {
+    ensureModels();
+    cfg.models.providers["gemini"] = {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      apiKey: process.env.GEMINI_API_KEY,
+      api: "openai-completions",
+      models: [
+        { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", params: { thinking: "off" } },
+        { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash-Lite", params: { thinking: "off" } }
+      ]
+    };
+  }
+  // [PATCH] 新增供应商：Agnes AI（OpenAI 兼容，免费全模态，agnes-2.0-flash 256K ctx + 工具调用）
+  if (process.env.AGNES_API_KEY) {
+    ensureModels();
+    cfg.models.providers["agnes"] = {
+      baseUrl: "https://apihub.agnes-ai.com/v1",
+      apiKey: process.env.AGNES_API_KEY,
+      api: "openai-completions",
+      models: [
+        { id: "agnes-2.0-flash", name: "Agnes 2.0 Flash (Free, 256K ctx)", params: { thinking: "off" } },
+        { id: "agnes-1.5-flash", name: "Agnes 1.5 Flash (Free)", params: { thinking: "off" } }
       ]
     };
   }
@@ -528,6 +584,36 @@ node -e '
   })(cfg);
   console.log("[config] thinking forced to 'off' (thinkingDefault + recursive clean).");
 
+  // [PATCH] 上下文裁剪护栏已移除：实测 OpenClaw 对 agents.defaults 采用严格 schema 校验，
+  // 注入 context / historyLimit 等非 schema 键会导致 "agents.defaults: Invalid input" 启动失败并触发 watchdog 重启循环。
+  // 上下文控制改用 schema 合法手段：禁用 memory-core 插件 + owl-alpha 大上下文主模型 + 必要时 OPENCLAW_RESET_STATE_ON_BOOT=1 清历史。
+  // [PATCH] 注入模型 fallback 链：主模型遇 429/413/超时时自动退到下一个，避免直接报死（之前 next=none）
+  // 顺序可用环境变量 OPENCLAW_FALLBACKS 覆盖（逗号分隔完整模型名）；否则按"已配置 key"自动构建。
+  if (cfg.agents && cfg.agents.defaults && cfg.agents.defaults.model && !cfg.agents.defaults.model.fallbacks) {
+    var __primary = cfg.agents.defaults.model.primary;
+    var __fb = [];
+    if (process.env.OPENCLAW_FALLBACKS) {
+      __fb = String(process.env.OPENCLAW_FALLBACKS).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    } else {
+      // 6 供应商兜底链：OpenRouter(19 key 轮换,大 ctx) → Agnes(256K) → SiliconFlow(60K TPM) → Gemini → Groq → Cerebras。
+      // 死链 owl-alpha / deepseek-v4-flash:free 已移除；lyria 系音频模型不可作聊天(已从主模型默认值修正)。
+      if (process.env.OPENROUTER_API_KEYS) { __fb.push("openrouter/nvidia/nemotron-3-super-120b-a12b:free"); __fb.push("openrouter/google/gemma-4-31b-it:free"); }
+      if (process.env.AGNES_API_KEY) { __fb.push("agnes/agnes-2.0-flash"); }
+      if (process.env.SILICONFLOW_API_KEY) { __fb.push("siliconflow/Qwen/Qwen3-8B"); }
+      if (process.env.GEMINI_API_KEY) { __fb.push("gemini/gemini-2.5-flash"); }
+      if (process.env.GROQ_API_KEY) { __fb.push("groq/qwen/qwen3-32b"); }
+      if (process.env.CEREBRAS_API_KEY) { __fb.push("cerebras/llama-3.3-70b"); }
+    }
+    __fb = __fb.filter(function (m, i) { return m !== __primary && __fb.indexOf(m) === i; });
+    if (__fb.length) { cfg.agents.defaults.model.fallbacks = __fb; console.log("[config] fallback chain set: " + __fb.join(" -> ")); }
+  }
+  // [PATCH] 按需裁剪插件以降低每次请求的上下文体积（环境变量 OPENCLAW_DISABLE_PLUGINS，逗号分隔；勿禁用 acpx/device-pair 等核心）
+  if (process.env.OPENCLAW_DISABLE_PLUGINS && cfg.plugins && cfg.plugins.entries) {
+    String(process.env.OPENCLAW_DISABLE_PLUGINS).split(",").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (name) {
+      cfg.plugins.entries[name] = { enabled: false };
+      console.log("[config] plugin disabled via OPENCLAW_DISABLE_PLUGINS: " + name);
+    });
+  }
   fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
   console.log("[config] Written to " + configPath);
 ' "${template_path}"
@@ -623,7 +709,7 @@ done
 # 强制修复飞书插件 require('root-alias.cjs/...') 子路径问题
 # 旧版飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
 # 若插件引用子模块 → root-alias.cjs 必须是目录（含 package.json + 软链接）
-# 若插件不引用子模块（版本匹配的常见情况）→ 简单重导出文件即可
+# 若插件不引���子模块（版本匹配的常见情况）→ 简单重导出文件即可
 PLUGIN_SDK_DIR="/app/openclaw/dist/plugin-sdk"
 if [ -d "$PLUGIN_SDK_DIR" ]; then
   # 清理旧格式：文件、软链接、目录
@@ -795,7 +881,7 @@ while true; do
     cleanup
   fi
 
-  # 检查 OpenRouter Proxy（可恢复）
+  # 检�� OpenRouter Proxy（可恢复）
   if ! kill -0 "${proxy_pid}" 2>/dev/null; then
     echo "[watchdog] openrouter_proxy died, restarting..."
     python3 /app/docker/openrouter_proxy.py &
