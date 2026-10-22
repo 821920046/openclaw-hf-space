@@ -78,7 +78,8 @@ OpenClaw 官方文档允许在受信任的仅回环环境中显式使用 `gatewa
 - `OPENCLAW_HF_STATE_REPO_TYPE`
   - 默认为 `dataset`
 - `OPENCLAW_HF_STATE_SYNC_INTERVAL`
-  - 默认为 `300` 秒。设置为 `0` 则禁用定期上传，仅在停机时同步。
+  - 默认为 `1800` 秒（每 30 分钟）。设置为 `0` 则关闭定期上传，仅在关机时同步。
+  - 状态内容未变化时自动跳过上传（hash 比对），空闲时零存储增长。
 - `OPENCLAW_HF_STATE_RESTORE_ON_BOOT`
   - 默认为 `1`
 - `OPENCLAW_HF_STATE_PRIVATE`
@@ -147,7 +148,7 @@ Agent 会自动调用飞书 API 创建文档并返回链接（如 `https://byted
 
 - 容器启动时，`start.sh` 通过 heredoc 将技能文件生成到 OpenClaw workspace（`~/.openclaw/.openclaw/workspace/skills/feishu-doc/`）
 - `SKILL.md` 文件告知 agent 如何调用飞书文档 API
-- `create-doc.sh` 脚本封装了两步 API 调用：
+- `feishu-create-doc` 脚本封装了两步 API 调用：
   1. 获取 `tenant_access_token`
   2. 调用 `POST /open-apis/docx/v1/documents` 创建文档
 
@@ -204,10 +205,10 @@ Hugging Face 免费 Docker Spaces 不提供持久化的本地磁盘，因此 `/r
 3. 在 `Settings -> Variables and secrets` 中添加：
    - `HF_TOKEN=<你的HF写入Token>`
    - `OPENCLAW_HF_STATE_REPO=<用户名>/<状态仓库名称>`
-   - 可选：`OPENCLAW_HF_STATE_SYNC_INTERVAL=300`
+   - 可选：`OPENCLAW_HF_STATE_SYNC_INTERVAL=1800`
 4. 重新构建 Space。
 5. 确认启动日志中包含如下行：
-   - `OpenClaw state sync: ENABLED (repo=..., type=dataset, interval=300s)`
+   - `OpenClaw state sync: ENABLED (repo=..., type=dataset, interval=1800s)`
 6. 更改配置、安装技能或更新记忆后，等待下一个同步间隔，或正常重启 Space 以触发关机同步上传最新状态。
 
 持久化的内容包括：
@@ -217,11 +218,41 @@ Hugging Face 免费 Docker Spaces 不提供持久化的本地磁盘，因此 `/r
 - `~/.openclaw` 下的设备和配对文件
 - 在 `~/.openclaw` 内部创建的其他运行文件
 
+备份体积控制：
+
+- 归档前会对 `*.db` 自动执行 SQLite `wal_checkpoint(TRUNCATE)`，保证恢复不丢最近写入，同时让 WAL 归零。
+- 仅排除可保证再生的产物：`__pycache__/`、`*.pyc`、`.cache/`（如飞书插件缓存，重启按需重下）、`*.log`。
+- `node_modules`、`.git` 等用户内容一律保留；配合内容 hash 去重，未变化时不会重复上传，因此无需用丢弃用户数据的方式换体积。
+
 权衡说明：
 
 - 之前的版本在恢复状态后会清除 `openclaw.json`，导致用户在 UI 中配置的记忆插件等失效。
 - **现已优化：** 启动脚本现在采用**智能合并策略**。它会保留恢复出的 `openclaw.json` 中的 `plugins`、`skills`、`memory` 和 `extensions` 等用户自定义段，仅用模板覆盖网络和网关等基础设施配置。
 - 如果以后更改了 Hugging Face 环境变量并需要它们**强制全量覆盖**恢复出的配置，请在重启时临时设置 `OPENCLAW_REWRITE_CONFIG_ON_BOOT=1`。
+
+## 防止免费版 Space 休眠（保活）
+
+Hugging Face 免费版 Space 在一段时间无活动后会进入休眠，首次唤醒需要 1-2 分钟。
+本仓库内置 `.github/workflows/keepalive.yml`，每 15 分钟自动访问一次 Space 根路径
+（Nginx 对 `/` 免认证返回 `200 ok`），即可让 Space 始终保持运行。
+
+配置方法（一次性）：
+
+1. 将本仓库推送到 GitHub（公开仓库即可，Actions 免费额度足够）。
+2. 在 GitHub 仓库页面进入 `Settings -> Secrets and variables -> Actions -> Variables`，
+   新建变量：
+   - `SPACE_URL` = 你的 Space 地址，例如 `https://用户名-space名.hf.space`
+3. 之后无需任何操作，工作流会自动运行；也可以在 `Actions` 标签页手动触发
+   （`workflow_dispatch`）验证。
+
+注意事项：
+
+- Space 地址末尾**不要**带 `/openclaw/` 路径，根路径 `/` 即可触发保活。
+- GitHub 计划任务偶尔会延迟几分钟，属正常现象，不影响防休眠效果。
+- 若 GitHub 仓库连续 60 天无任何提交，GitHub 会自动停用该仓库的计划任务，
+  届时任意推送一次代码即可恢复。
+- 如果你使用外部监控服务（如 UptimeRobot、cron-job.org）监控 `https://<space>/`，
+   效果相同，可任选其一，不要叠加多个。
 
 ## 部署步骤
 
@@ -265,7 +296,7 @@ Space 根路径 `/` 保留用于 Hugging Face 健康检查，应返回纯文本 
   - `HF_TOKEN=<你的HF写入Token>`
   - `OPENCLAW_HF_STATE_REPO=<用户名>/<状态仓库名称>`
   - `OPENCLAW_HF_STATE_REPO_TYPE=dataset`
-  - `OPENCLAW_HF_STATE_SYNC_INTERVAL=300`
+  - `OPENCLAW_HF_STATE_SYNC_INTERVAL=1800`
 - **其它可选**
   - `SPACE_HOST`
   - `OPENCLAW_CONFIG_JSON_B64`（当你希望将完整的 OpenClaw 配置作为 secret 存储时）
@@ -300,14 +331,16 @@ docker run --rm -p 7860:7860 \
 
 ## 文件说明
 
-- `Dockerfile`: OpenClaw 多阶段构建及运行镜像（已修正 skills 目录路径映射）
+- `Dockerfile`: OpenClaw 多阶段构建及运行镜像（已修正 skills 目录路径映射；runtime 阶段不安装编译链与未使用的 lark CLI，镜像更小、冷启动更快）
 - `docker/nginx.conf`: 边缘认证 + 反向代理 + WebSocket 支持（已开启 gzip 压缩和基础防暴破限速）
-- `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本（已内置智能配置合并与进程 Watchdog 监控）
+- `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本（已内置智能配置合并、定期/关机状态同步与进程 Watchdog 监控）
 - `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板（默认开启 `basic-memory` 记忆插槽）
-- `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化（支持指数退避重试与恢复完整性校验）
+- `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化（支持指数退避重试、恢复完整性校验、备份垃圾排除）
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡、多线程并发转发、请求超时保护与 OpenRouter 代理故障转移
+- `.github/workflows/keepalive.yml`: 每 15 分钟访问 Space 根路径，防止免费版 Space 休眠
+- `.gitignore` / `.dockerignore`: 阻止 `__pycache__`、`*.pyc`、`*.7z` 等垃圾进入部署仓库与构建上下文
 - `docker/start.sh` 内置飞书文档创建技能（启动时通过 heredoc 生成 `SKILL.md` + `create-doc.sh` 到 workspace）
 
 ## 系统稳定性保障 (2026.05 优化)

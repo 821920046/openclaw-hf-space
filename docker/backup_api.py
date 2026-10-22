@@ -29,7 +29,6 @@ class BackupHandler(http.server.SimpleHTTPRequestHandler):
                 "--repo-type", os.environ.get("OPENCLAW_HF_STATE_REPO_TYPE", "dataset"),
                 "--archive-name", os.environ.get("OPENCLAW_HF_STATE_ARCHIVE_NAME", "openclaw-home.tgz"),
                 "--metadata-name", os.environ.get("OPENCLAW_HF_STATE_METADATA_NAME", "openclaw-state.json"),
-                "--hash-cache", os.environ.get("OPENCLAW_HF_STATE_HASH_CACHE", "/tmp/openclaw-hf-state.sha256"),
                 "--reason", "manual_api"
             ]
             if os.environ.get("OPENCLAW_HF_STATE_PRIVATE", "1") == "1":

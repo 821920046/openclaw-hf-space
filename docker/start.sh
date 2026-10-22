@@ -767,6 +767,22 @@ nginx -g "daemon off;" &
 nginx_pid=$!
 echo "[startup] nginx started (PID: ${nginx_pid})"
 
+# --- 7b. 定期状态同步配置（实际执行并入下方 Watchdog 主循环）---
+# 免费版 Space 随时可能被平台强杀（无优雅关机），仅靠关机同步会丢失状态。
+# 刻意不用独立子进程：并入主循环后所有保存动作天然串行，
+# 从结构上杜绝"定时同步与关机同步并发上传同一仓库"的竞态。
+sync_interval="${OPENCLAW_HF_STATE_SYNC_INTERVAL:-1800}"
+if [[ "${hf_state_enabled}" == "1" ]] && [[ "${sync_interval}" != "0" ]]; then
+  if ! [[ "${sync_interval}" =~ ^[0-9]+$ ]] || [[ "${sync_interval}" -lt 60 ]]; then
+    echo "[state-sync] WARNING: invalid OPENCLAW_HF_STATE_SYNC_INTERVAL='${sync_interval}', falling back to 1800"
+    sync_interval=1800
+  fi
+  echo "[state-sync] OpenClaw state sync: ENABLED (repo=${OPENCLAW_HF_STATE_REPO}, type=${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}, interval=${sync_interval}s)"
+else
+  sync_interval=0
+  echo "[state-sync] Periodic sync disabled (interval=0 or no state repo); shutdown sync still active."
+fi
+
 # 优雅关闭：清理所有子进程
 cleanup() {
   echo "[shutdown] Cleaning up all processes..."
@@ -786,8 +802,22 @@ trap cleanup EXIT INT TERM
 
 # --- Watchdog：监控子进程健康，自动重启崩溃的服务 ---
 echo "[watchdog] Process monitoring started (interval: 30s)"
+last_state_sync=$(date +%s)
 while true; do
   sleep 30
+
+  # 定期状态同步：到达间隔且状态仓库已启用时执行（内容未变则自动跳过上传）
+  if [[ "${sync_interval}" != "0" ]]; then
+    now_ts=$(date +%s)
+    if (( now_ts - last_state_sync >= sync_interval )); then
+      last_state_sync=${now_ts}
+      python3 /app/docker/hf-state-store.py save \
+        --reason interval \
+        --home "${OPENCLAW_HOME}" \
+        --repo-id "${OPENCLAW_HF_STATE_REPO}" \
+        --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" || true
+    fi
+  fi
 
   # 检查 Gateway（核心进程，崩溃则退出容器让 HF 重启）
   if ! kill -0 "${gateway_pid}" 2>/dev/null; then

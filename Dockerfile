@@ -80,19 +80,16 @@ RUN apt-get update \
         python3 \
         python3-pip \
         curl \
-        build-essential \
-        python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
-# 安装飞书 CLI 和常用 Python 库
-RUN npm install -g @lark-opdev/cli --registry=https://registry.npmmirror.com \
-    && python3 -m pip install --break-system-packages --no-cache-dir \
-        huggingface_hub==1.7.1 \
-        requests==2.31.0 \
-        lark-oapi \
-        pydantic \
-        httpx
+# 安装常用 Python 库（全部为纯 Python wheel，无需编译链；
+# 因此镜像中刻意不安装 build-essential / python3-dev，节省约 250MB）
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    huggingface_hub==1.7.1 \
+    requests==2.31.0 \
+    pydantic \
+    httpx
 
 WORKDIR /app
 COPY --from=builder /src/openclaw /app/openclaw

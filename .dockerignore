@@ -1,0 +1,9 @@
+# Docker 构建上下文瘦身：Dockerfile 只 COPY 指定文件，
+# 其余内容不进构建上下文，加快 HF 构建服务器上传与解析。
+.git
+.github
+.claude
+__pycache__
+*.pyc
+*.7z
+*.md
