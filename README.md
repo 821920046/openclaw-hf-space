@@ -339,6 +339,8 @@ docker run --rm -p 7860:7860 \
 - `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡、多线程并发转发、请求超时保护与 OpenRouter 代理故障转移
+- `docker/openrouter_models.py`: OpenRouter 免费模型监测（拉取目录 + 调用榜单，剔除下架/失效模型，按调用量输出 Top5）
+- `tests/test_openrouter_models.py`: 监测模块离线单元测试（mock 网络，覆盖过滤/聚合/排序/探测分类/Key 轮换）
 - `.github/workflows/keepalive.yml`: 每 15 分钟访问 Space 根路径，防止免费版 Space 休眠
 - `.gitignore` / `.dockerignore`: 阻止 `__pycache__`、`*.pyc`、`*.7z` 等垃圾进入部署仓库与构建上下文
 - `docker/start.sh` 内置飞书文档创建技能（启动时通过 heredoc 生成 `SKILL.md` + `create-doc.sh` 到 workspace）
@@ -555,6 +557,44 @@ Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签�
   - 通过具有 OpenAI 兼容路径的端点启用阿里灵积（DashScope）。这通常依赖于新客免费额度或促销额度，而非永久无限次免费使用。
 - `SILICONFLOW_API_KEY`
   - 通过其 OpenAI 兼容端点启用硅基流动（SiliconFlow）。SiliconFlow 提供了一系列免费模型，但列表和限制可能随时间更改。
+
+## OpenRouter 免费模型自动监测（账号池场景）
+
+OpenRouter 免费模型会随时下架（转为付费或直接除名），硬编码的模型列表容易失效。本项目内置自动监测，每次容器启动时刷新，管理控制台也可手动刷新。
+
+### 监测逻辑
+
+`docker/openrouter_models.py` 拉取两个公开数据源（均无需 API Key）：
+
+| 数据源 | 提供信息 |
+| --- | --- |
+| `https://openrouter.ai/api/v1/models` | 全量目录：免费标识（prompt/completion 价格均为 0）、`expiration_date` 官方下架日期、上下文长度、模态、工具调用能力 |
+| `https://openrouter.ai/api/frontend/v1/rankings/models` | 近 7 天每日每模型调用次数（`count`）与 token 量 |
+
+筛选与排序流程：
+
+1. 过滤：仅保留免费（双价格为 0）、可对话（text→text 模态）、非路由入口（`openrouter/auto` 类）的模型
+2. 剔除：已过 `expiration_date` 的模型（官方下架日）
+3. 探活（可选）：配置了 `OPENROUTER_API_KEYS` 时，对候选模型发 1 token 请求实测，剔除返回 404/400（模型已不可用）的
+4. 排序：近 7 天调用量降序（token 量、上下文长度、发布时间作为次序键）
+5. 取前 5 名写入 `free-models.json`
+
+### 接入方式
+
+- **启动时**：`start.sh` 在配置生成前运行监测（150 秒超时），失败时沿用上一次的结果，再不行回退到内置列表
+- **控制台**：管理后台「免费模型」标签页展示排名表（调用量 / token / 上下文 / 工具 / 下架倒计时 / 探活状态），可点按钮强制刷新
+- **配置注入**：OpenRouter provider 的模型列表和 fallback 链前两位自动替换为监测 Top5 / Top2
+
+### 环境变量
+
+- `OPENROUTER_FREE_MODELS_FILE`
+  - 监测结果文件路径，默认 `/app/docker/free-models.json`。仓库中随附一份构建时快照作为兜底。
+
+### 监测输出字段
+
+`free-models.json` 包含：`generated_at`（生成时间）、`window_days`（统计窗口）、`probed`（是否执行了探活）、`top`（Top5 明细）、`excluded`（被剔除模型及原因）、`stats`（统计摘要）。
+
+---
 
 ## 支持的默认模型
 

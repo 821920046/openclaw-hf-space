@@ -387,11 +387,22 @@ node -e '
   console.log("[patch] Successfully patched: " + resolved);
 '
 
+# --- 4d. OpenRouter 免费模型监测：启动时刷新 Top5，供配置生成注入 ---
+# 目录与榜单均为公开接口免鉴权；配置了 Key 时附带探活。失败不阻塞启动：
+# 沿用上一次的 free-models.json，没有再回退到 node 脚本里的内置列表。
+echo "[models] Checking OpenRouter free models (top 5 by recent usage)..."
+if timeout 150 python3 /app/docker/openrouter_models.py --out /app/docker/free-models.json; then
+  echo "[models] free-models.json refreshed"
+else
+  echo "[models] WARNING: free model check failed; using previous free-models.json or builtin list"
+fi
+
 # --- 5. 配置文件生成 ---
 echo "[config] Rendering openclaw.json from template..."
 template_path="/app/docker/openclaw.template.json"
 export BROWSER_CONTROL_TOKEN="${BROWSER_CONTROL_TOKEN:-openclaw_static_token}"
 export OPENROUTER_API_KEYS="${OPENROUTER_API_KEY:-${OPENROUTER_API_KEYS:-}}"
+export OPENROUTER_FREE_MODELS_FILE="${OPENROUTER_FREE_MODELS_FILE:-/app/docker/free-models.json}"
 
 node -e '
   const fs = require("fs");
@@ -421,21 +432,46 @@ node -e '
   let cfg = JSON.parse(cfgRaw);
 
   // --- 基础设施段（始终从环境变量/模板生成）---
+  // --- OpenRouter 免费模型 Top5：优先使用 openrouter_models.py 启动时生成的监测结果 ---
+  // 监测源：OpenRouter 公开目录（免费标识/下架日期/能力）+ 公开使用榜单（近 7 天调用量）+ Key 探活。
+  // 无监测结果时回退内置列表（可能与线上最新免费模型有出入，仅作兜底）。
+  var __orBuiltin = [
+    { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "NVIDIA Nemotron 3 Super 120B (Free, 1M ctx)", params: { thinking: "off" } },
+    { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)", params: { thinking: "off" } },
+    { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)", params: { thinking: "off" } },
+    { id: "qwen/qwen3-coder:free", name: "Qwen3 Coder 480B (Free, 1M ctx)", params: { thinking: "off" } },
+    { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)", params: { thinking: "off" } },
+    { id: "openai/gpt-oss-120b:free", name: "OpenAI GPT-OSS 120B (Free, 131K ctx)", params: { thinking: "off" } }
+  ];
+  var __orTop5 = [];
+  try {
+    var __fm = JSON.parse(fs.readFileSync(getEnv("OPENROUTER_FREE_MODELS_FILE", "/app/docker/free-models.json"), "utf8"));
+    if (__fm && Array.isArray(__fm.top) && __fm.top.length) {
+      __orTop5 = __fm.top.map(function (m) {
+        return { id: m.id, name: (m.name || m.id) + " (Free, " + Math.round((m.context_length || 0) / 1024) + "K ctx)", params: { thinking: "off" } };
+      });
+    }
+  } catch (e) { /* 无监测结果文件，走内置列表 */ }
+  var __orModels = __orTop5.length ? __orTop5 : __orBuiltin;
+  // 保险：用户主模型若是 openrouter/* 且不在监测 Top5 / 内置列表中，显式补注册，
+  // 避免监测结果替换列表后主模型无法解析（主模型仍走用户配置，不进 fallback 链）
+  var __primaryRaw = getEnv("OPENCLAW_DEFAULT_MODEL", "");
+  if (__primaryRaw.indexOf("openrouter/") === 0) {
+    var __primaryId = __primaryRaw.slice("openrouter/".length);
+    if (__primaryId && !__orModels.some(function (m) { return m.id === __primaryId; })) {
+      __orModels = [{ id: __primaryId, name: __primaryId + " (configured primary)", params: { thinking: "off" } }].concat(__orModels);
+      console.log("[config] primary " + __primaryId + " not in monitored/builtin list; registered explicitly");
+    }
+  }
   if (process.env.OPENROUTER_API_KEYS) {
     if (!cfg.models) cfg.models = { mode: "merge", providers: {} };
     cfg.models.providers["openrouter"] = {
       baseUrl: "http://127.0.0.1:18780/api/v1",
       apiKey: "dummy_proxy_key",
       api: "openai-completions",
-      models: [
-        { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "NVIDIA Nemotron 3 Super 120B (Free, 1M ctx)", params: { thinking: "off" } },
-        { id: "google/gemma-4-31b-it:free", name: "Google Gemma 4 31B (Free, 262K ctx)", params: { thinking: "off" } },
-        { id: "google/gemma-4-26b-a4b-it:free", name: "Google Gemma 4 26B A4B (Free, 262K ctx)", params: { thinking: "off" } },
-        { id: "qwen/qwen3-coder:free", name: "Qwen3 Coder 480B (Free, 1M ctx)", params: { thinking: "off" } },
-        { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", name: "NVIDIA Nemotron 3 Nano Reasoning (Free, 256K ctx)", params: { thinking: "off" } },
-        { id: "openai/gpt-oss-120b:free", name: "OpenAI GPT-OSS 120B (Free, 131K ctx)", params: { thinking: "off" } }
-      ]
+      models: __orModels
     };
+    console.log("[config] openrouter models (" + (__orTop5.length ? "monitored" : "builtin") + "): " + __orModels.map(function (m) { return m.id; }).join(", "));
   }
   // [PATCH] 新增：快速免费提供商（按需用环境变量启用，OpenAI 兼容接口）
   function ensureModels() {
@@ -600,7 +636,14 @@ node -e '
     } else {
       // 6 供应商兜底链：OpenRouter(19 key 轮换,大 ctx) → Agnes(256K) → SiliconFlow(60K TPM) → Gemini → Groq → Cerebras。
       // 死链 owl-alpha / deepseek-v4-flash:free 已移除；lyria 系音频模型不可作聊天(已从主模型默认值修正)。
-      if (process.env.OPENROUTER_API_KEYS) { __fb.push("openrouter/nvidia/nemotron-3-super-120b-a12b:free"); __fb.push("openrouter/google/gemma-4-31b-it:free"); }
+      // OpenRouter 兜底取监测 Top2（与 provider 模型列表同源，排除主模型自身；无监测结果时为内置列表前两名）。
+      if (process.env.OPENROUTER_API_KEYS && __orModels.length) {
+        var __orFb = __orModels.filter(function (m) { return "openrouter/" + m.id !== __primary; });
+        if (__orFb.length) {
+          __fb.push("openrouter/" + __orFb[0].id);
+          if (__orFb[1]) __fb.push("openrouter/" + __orFb[1].id);
+        }
+      }
       if (process.env.AGNES_API_KEY) { __fb.push("agnes/agnes-2.0-flash"); }
       if (process.env.SILICONFLOW_API_KEY) { __fb.push("siliconflow/Qwen/Qwen3-8B"); }
       if (process.env.GEMINI_API_KEY) { __fb.push("gemini/gemini-2.5-flash"); }

@@ -1,0 +1,107 @@
+{
+  "generated_at": "2026-10-23T15:42:11+00:00",
+  "window_days": 7,
+  "probed": false,
+  "top": [
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "name": "NVIDIA: Nemotron 3 Ultra (free)",
+      "canonical_slug": "nvidia/nemotron-3-ultra-550b-a55b-20260604",
+      "requests": 31845234,
+      "tokens": 4627718266733,
+      "context_length": 1000000,
+      "tools": true,
+      "reasoning": true,
+      "multimodal_input": false,
+      "expires_in_days": null,
+      "created": 1780551208,
+      "probe": "skipped",
+      "probe_detail": "未配置 Key 跳过探测",
+      "rank": 1
+    },
+    {
+      "id": "nvidia/nemotron-3.5-super-vl:free",
+      "name": "NVIDIA: Nemotron 3.5 Super VL (free)",
+      "canonical_slug": "nvidia/nemotron-3.5-super-vl-20261015",
+      "requests": 14291741,
+      "tokens": 1383748329050,
+      "context_length": 1000000,
+      "tools": true,
+      "reasoning": false,
+      "multimodal_input": true,
+      "expires_in_days": null,
+      "created": 1792076662,
+      "probe": "skipped",
+      "probe_detail": "未配置 Key 跳过探测",
+      "rank": 2
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning:free",
+      "name": "NVIDIA: Nemotron 3.5 Lightning (free)",
+      "canonical_slug": "nvidia/nemotron-3.5-lightning-20260807",
+      "requests": 14024362,
+      "tokens": 808019981696,
+      "context_length": 1000000,
+      "tools": true,
+      "reasoning": false,
+      "multimodal_input": false,
+      "expires_in_days": null,
+      "created": 1786452751,
+      "probe": "skipped",
+      "probe_detail": "未配置 Key 跳过探测",
+      "rank": 3
+    },
+    {
+      "id": "dots-studio/dots-3-note-preview:free",
+      "name": "Dots Studio: Dots3-Note Preview (free)",
+      "canonical_slug": "dots-studio/dots-3-note-preview-20260813",
+      "requests": 14011515,
+      "tokens": 644200499426,
+      "context_length": 512000,
+      "tools": true,
+      "reasoning": false,
+      "multimodal_input": true,
+      "expires_in_days": 68,
+      "created": 1786680361,
+      "probe": "skipped",
+      "probe_detail": "未配置 Key 跳过探测",
+      "rank": 4
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1 (free)",
+      "canonical_slug": "poolside/laguna-s-2.1-20260720",
+      "requests": 12940546,
+      "tokens": 936275081961,
+      "context_length": 262144,
+      "tools": true,
+      "reasoning": true,
+      "multimodal_input": false,
+      "expires_in_days": 7,
+      "created": 1784652683,
+      "probe": "skipped",
+      "probe_detail": "未配置 Key 跳过探测",
+      "rank": 5
+    }
+  ],
+  "excluded": [
+    {
+      "id": "google/lyria-3-pro-preview",
+      "reason": "非对话模态: text+image->text+audio"
+    },
+    {
+      "id": "google/lyria-3-clip-preview",
+      "reason": "非对话模态: text+image->text+audio"
+    },
+    {
+      "id": "openrouter/free",
+      "reason": "随机路由入口，非具体模型"
+    }
+  ],
+  "stats": {
+    "free_in_catalog": 20,
+    "chat_candidates": 17,
+    "probed": 0,
+    "excluded": 3
+  }
+}
