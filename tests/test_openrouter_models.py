@@ -154,4 +154,30 @@ u["x/a-20260101"] = {"requests": 20, "tokens": 99}           # 并列时比 toke
 assert orm.usage_sort_key(m1, u) < orm.usage_sort_key(m2, u)
 print("T6 usage_sort_key: PASS")
 
+# ---------- 7. primary_status：主模型下线判定（只依据目录事实，不依赖探测） ----------
+from datetime import timedelta
+past = (NOW - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+future = (NOW + timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
+cat = [
+    mk_model("vendor/alive:free", canonical="vendor/alive-20260101"),
+    mk_model("vendor/paid", canonical="vendor/paid-20260101", prompt="0.000001"),
+    mk_model("vendor/expired:free", canonical="vendor/expired-20260101", expiry=past),
+    mk_model("vendor/okexp:free", canonical="vendor/okexp-20260101", expiry=future),
+]
+assert orm.primary_status(cat, "vendor/alive:free", NOW) == "ok"
+assert orm.primary_status(cat, "vendor/paid", NOW) == "delisted"          # 已转付费
+assert orm.primary_status(cat, "vendor/expired:free", NOW) == "expired"   # 已过下架日
+assert orm.primary_status(cat, "vendor/okexp:free", NOW) == "ok"          # 未到下架日
+assert orm.primary_status(cat, "vendor/gone:free", NOW) == "delisted"     # 目录除名
+assert orm.primary_status(cat, "", NOW) == "not_configured"
+assert orm.primary_status(cat, "free", NOW) == "not_configured"           # 随机路由入口
+assert orm.primary_status(cat, "auto", NOW) == "not_configured"
+# build_report 带上 primary 时输出 primary/primary_status 字段
+rep = orm.build_report(cat, {}, {}, top_n=5, days=7, today=NOW, probed=False,
+                       primary_id="vendor/paid")
+assert rep["primary"] == "vendor/paid" and rep["primary_status"] == "delisted", rep
+rep2 = orm.build_report(cat, {}, {}, top_n=5, days=7, today=NOW, probed=False)
+assert rep2["primary"] is None and rep2["primary_status"] == "not_configured"
+print("T7 primary_status: PASS（转付费/过期/除名/路由入口/未配置全部正确）")
+
 print("ALL_UNIT_TESTS_PASS")

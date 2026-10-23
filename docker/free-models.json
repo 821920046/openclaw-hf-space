@@ -1,7 +1,9 @@
 {
-  "generated_at": "2026-10-23T15:42:11+00:00",
+  "generated_at": "2026-10-23T16:00:52+00:00",
   "window_days": 7,
   "probed": false,
+  "primary": "nvidia/nemotron-3-super-120b-a12b:free",
+  "primary_status": "ok",
   "top": [
     {
       "id": "nvidia/nemotron-3-ultra-550b-a55b:free",

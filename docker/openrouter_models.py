@@ -193,8 +193,27 @@ def usage_sort_key(m: dict, usage: dict[str, dict]) -> tuple:
     u = usage.get(m.get("canonical_slug") or "", {"requests": 0, "tokens": 0})
     return (-u["requests"], -u["tokens"], -int(m.get("context_length") or 0), -(m.get("created") or 0))
 
+def primary_status(catalog: list[dict], primary_id: str, today: datetime) -> str:
+    """判定主模型可用性。仅依据目录事实（是否免费/是否过期/是否除名），不依赖探测结果——
+    探测可能因限流等瞬时原因失败，若据此重启会造成重启循环。
+    返回值：ok / expired / delisted / not_configured"""
+    pid = (primary_id or "").strip()
+    if not pid or pid in ("free", "auto"):
+        return "not_configured"  # 未配置或随机路由入口，无从判定也无需切换
+    for m in catalog:
+        if m.get("id") == pid:
+            if not is_free(m):
+                return "delisted"  # 已转为付费
+            remain = days_until_expiry(m, today)
+            if remain is not None and remain < 0:
+                return "expired"  # 已过官方下架日
+            return "ok"
+    return "delisted"  # 目录中已除名
+
+
 def build_report(catalog: list[dict], usage: dict[str, dict], probe_results: dict[str, tuple[str, str]],
-                 top_n: int, days: int, today: datetime, probed: bool) -> dict:
+                 top_n: int, days: int, today: datetime, probed: bool,
+                 primary_id: str = "") -> dict:
     candidates: list[dict] = []
     excluded: list[dict] = []
     for m in catalog:
@@ -253,6 +272,8 @@ def build_report(catalog: list[dict], usage: dict[str, dict], probe_results: dic
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "window_days": days,
         "probed": probed,
+        "primary": primary_id or None,
+        "primary_status": primary_status(catalog, primary_id, today),
         "top": final[:top_n],
         "excluded": excluded,
         "stats": {
@@ -269,6 +290,10 @@ def print_report(report: dict) -> None:
     log(f"窗口 {report['window_days']} 天 | 目录免费模型 {report['stats']['free_in_catalog']} 个 | "
         f"对话候选 {report['stats']['chat_candidates']} 个 | 探测 {report['stats']['probed']} 个 | "
         f"排除 {report['stats']['excluded']} 个")
+    pstat = report.get("primary_status", "not_configured")
+    if pstat != "not_configured":
+        log(f"主模型 {report.get('primary')} 状态: {pstat}"
+            + ("（已下线，需切换）" if pstat in ("delisted", "expired") else ""))
     if not top:
         log("未得到可用模型（详见 excluded）")
         return
@@ -293,7 +318,8 @@ def load_result(path: Path) -> dict | None:
         return None
 
 
-def run_check(out_path: Path, top_n: int = 5, days: int = 7, use_probe: bool | None = None) -> dict:
+def run_check(out_path: Path, top_n: int = 5, days: int = 7, use_probe: bool | None = None,
+              primary_id: str = "") -> dict:
     """完整流程：目录 → 榜单 → 过滤 → 探活 → 排名 → 落盘。供 CLI 与 admin API 共用。"""
     today = datetime.now(timezone.utc)
     keys = [k.strip() for k in os.environ.get("OPENROUTER_API_KEYS", os.environ.get("OPENROUTER_API_KEY", "")).split(",") if k.strip()]
@@ -324,7 +350,8 @@ def run_check(out_path: Path, top_n: int = 5, days: int = 7, use_probe: bool | N
                 except Exception as e:  # noqa: BLE001 - 单模型探测失败不影响整体
                     probe_results[mid] = ("unknown", f"probe error: {e}")
 
-    report = build_report(catalog, usage, probe_results, top_n, days, today, probed=use_probe)
+    report = build_report(catalog, usage, probe_results, top_n, days, today, probed=use_probe,
+                          primary_id=primary_id)
     print_report(report)
 
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -356,9 +383,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top", type=int, default=5, help="输出前 N 个模型（默认 5）")
     parser.add_argument("--days", type=int, default=7, help="统计最近 N 天调用量（默认 7）")
     parser.add_argument("--no-probe", action="store_true", help="跳过探活（未配置 Key 时自动跳过）")
+    parser.add_argument("--primary", default="", help="当前主模型 ID（openrouter/ 前缀可省略），用于判定是否已下线")
     args = parser.parse_args(argv)
     try:
-        run_check(args.out, top_n=args.top, days=args.days, use_probe=False if args.no_probe else None)
+        run_check(args.out, top_n=args.top, days=args.days, use_probe=False if args.no_probe else None,
+                  primary_id=args.primary)
     except Exception as e:  # noqa: BLE001 - 顶层兜底：启动脚本依赖退出码决定是否回退
         log(f"ERROR: {e}")
         return 1

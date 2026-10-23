@@ -209,6 +209,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     html += '<div style="margin-top:0.75rem;font-size:0.75rem;color:#6b7280;">已排除 ' + data.excluded.length + ' 个：' +
                         data.excluded.map(e => e.id + '（' + e.reason + '）').join('；') + '</div>';
                 }
+                const ps = data.primary_status || 'not_configured';
+                if (ps !== 'not_configured' && data.primary) {
+                    const psBadge = ps === 'ok'
+                        ? '<span class="badge badge-green">✓ 可用</span>'
+                        : `<span class="badge badge-red">✗ 已下线（${ps === 'expired' ? '已过下架日' : '转付费/除名'}），将自动切换</span>`;
+                    html = `<div style="margin-bottom:0.5rem;font-size:0.8rem;">主模型 <span class="mono">${data.primary}</span> ${psBadge}</div>` + html;
+                }
                 box.innerHTML = html;
             } catch (e) {
                 dot.className = 'status-dot status-red';

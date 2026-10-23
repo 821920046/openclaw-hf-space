@@ -391,10 +391,42 @@ node -e '
 # 目录与榜单均为公开接口免鉴权；配置了 Key 时附带探活。失败不阻塞启动：
 # 沿用上一次的 free-models.json，没有再回退到 node 脚本里的内置列表。
 echo "[models] Checking OpenRouter free models (top 5 by recent usage)..."
-if timeout 150 python3 /app/docker/openrouter_models.py --out /app/docker/free-models.json; then
+# 主模型若为 OpenRouter 模型，取裸 ID 供监测判定是否已下线（转付费/过下架日/除名）
+or_primary_id=""
+if [[ "${OPENCLAW_DEFAULT_MODEL}" == openrouter/* ]]; then
+  or_primary_id="${OPENCLAW_DEFAULT_MODEL#openrouter/}"
+fi
+# 从监测结果读取主模型状态；$1 为结果文件路径
+read_primary_status() {
+  python3 -c "import json;print(json.load(open('$1',encoding='utf-8')).get('primary_status',''))" 2>/dev/null || echo ""
+}
+read_top1() {
+  python3 -c "import json;d=json.load(open('$1',encoding='utf-8'));print(d['top'][0]['id'] if d.get('top') else '')" 2>/dev/null || echo ""
+}
+# 主模型已下线且存在替补时，把主模型切换到当前调用量第一的免费模型
+maybe_switch_primary() {
+  local fm_file="$1" p_status new_top1
+  [[ -n "${or_primary_id}" ]] || return 0
+  p_status="$(read_primary_status "${fm_file}")"
+  if [[ "${p_status}" != "delisted" && "${p_status}" != "expired" ]]; then
+    return 0
+  fi
+  new_top1="$(read_top1 "${fm_file}")"
+  if [[ -z "${new_top1}" ]]; then
+    echo "[models] WARNING: primary ${OPENCLAW_DEFAULT_MODEL} is ${p_status} but no free replacement available; keeping it"
+    return 0
+  fi
+  echo "[models] WARNING: primary ${OPENCLAW_DEFAULT_MODEL} is ${p_status} (delisted/expired); auto-switching to openrouter/${new_top1}"
+  export OPENCLAW_DEFAULT_MODEL="openrouter/${new_top1}"
+  or_primary_id="${new_top1}"
+}
+if timeout 150 python3 /app/docker/openrouter_models.py --out /app/docker/free-models.json --primary "${or_primary_id}"; then
   echo "[models] free-models.json refreshed"
+  maybe_switch_primary /app/docker/free-models.json
 else
   echo "[models] WARNING: free model check failed; using previous free-models.json or builtin list"
+  # 实时检查失败也看一眼上次结果：若主模型当时已下线，照样切换，避免重启循环
+  maybe_switch_primary /app/docker/free-models.json
 fi
 
 # --- 5. 配置文件生成 ---
@@ -915,6 +947,22 @@ else
   echo "[state-sync] Periodic sync disabled (interval=0 or no state repo); shutdown sync still active."
 fi
 
+# --- 7c. 免费模型定期刷新配置（实际执行并入下方 Watchdog 主循环）---
+# 解决"运行中免费模型下线"：定期重跑监测，若主模型已转付费/过下架日/除名，
+# 退出容器（cleanup 会先同步状态），HF 重启后 4d 节自动把主模型切换到新 Top1。
+# 判定只依据目录事实（不依赖探活），且重启前复核一次，避免接口瞬时不完整导致误重启。
+fm_refresh_interval="${OPENROUTER_FREE_MODELS_REFRESH_INTERVAL:-21600}"
+if [[ "${fm_refresh_interval}" != "0" ]]; then
+  if ! [[ "${fm_refresh_interval}" =~ ^[0-9]+$ ]] || [[ "${fm_refresh_interval}" -lt 300 ]]; then
+    echo "[models] WARNING: invalid OPENROUTER_FREE_MODELS_REFRESH_INTERVAL='${fm_refresh_interval}', falling back to 21600"
+    fm_refresh_interval=21600
+  fi
+  echo "[models] Periodic free-model refresh: ENABLED (interval=${fm_refresh_interval}s, primary=${OPENCLAW_DEFAULT_MODEL})"
+else
+  echo "[models] Periodic free-model refresh disabled; startup check and console refresh still active."
+fi
+last_fm_refresh=$(date +%s)
+
 # 优雅关闭：清理所有子进程
 cleanup() {
   echo "[shutdown] Cleaning up all processes..."
@@ -951,6 +999,40 @@ while true; do
         --repo-id "${OPENCLAW_HF_STATE_REPO}" \
         --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" \
         >> "${LOG_FILE:-/dev/stderr}" 2>&1 || true
+    fi
+  fi
+
+  # 定期刷新免费模型监测：主模型运行中下线时退出容器，HF 重启后 4d 节自动切换到新 Top1。
+  # 与状态同步同理串行执行；判定只依据目录事实，且重启前复核一次防误判。
+  if [[ "${fm_refresh_interval}" != "0" ]]; then
+    now_ts=$(date +%s)
+    if (( now_ts - last_fm_refresh >= fm_refresh_interval )); then
+      last_fm_refresh=${now_ts}
+      cur_or_primary=""
+      if [[ "${OPENCLAW_DEFAULT_MODEL}" == openrouter/* ]]; then
+        cur_or_primary="${OPENCLAW_DEFAULT_MODEL#openrouter/}"
+      fi
+      if [[ -n "${cur_or_primary}" ]]; then
+        echo "[models] periodic free-model check (primary=${cur_or_primary})..."
+        if timeout 150 python3 /app/docker/openrouter_models.py \
+            --out /app/docker/free-models.json --primary "${cur_or_primary}" \
+            >> "${LOG_FILE:-/dev/stderr}" 2>&1; then
+          p_status="$(read_primary_status /app/docker/free-models.json)"
+          if [[ "${p_status}" == "delisted" || "${p_status}" == "expired" ]]; then
+            # 复核：5 秒后独立重拉一次目录，两次都判定下线才动作
+            sleep 5
+            if timeout 150 python3 /app/docker/openrouter_models.py \
+                --out /app/docker/free-models.json --primary "${cur_or_primary}" \
+                >> "${LOG_FILE:-/dev/stderr}" 2>&1; then
+              p_status2="$(read_primary_status /app/docker/free-models.json)"
+              if [[ "${p_status2}" == "delisted" || "${p_status2}" == "expired" ]]; then
+                echo "[models] CRITICAL: primary ${cur_or_primary} is ${p_status2} (confirmed twice); exiting container to apply new Top1"
+                cleanup
+              fi
+            fi
+          fi
+        fi
+      fi
     fi
   fi
 
