@@ -63,5 +63,10 @@ RUN chmod +x /app/docker/start.sh /app/docker/hf-state-store.py /app/docker/back
     && mkdir -p /root/.openclaw/workspace/skills /var/lib/nginx /var/log/nginx /run/nginx \
     && chmod -R 777 /root/.openclaw
 
+# 防御性修复行尾：在 Windows 上编辑/上传的文件可能带 CRLF，Linux 容器里会直接炸——
+# start.sh 的 shebang 变成 "#!/usr/bin/env bash\r"，报 /usr/bin/env: 'bash\r': No such file or directory；
+# nginx.conf 会解析失败。构建时统一去掉行尾 \r，从根上避免这类问题。
+RUN sed -i 's/\r$//' /app/docker/start.sh /app/docker/*.py /etc/nginx/nginx.conf
+
 EXPOSE 7860
 CMD ["/app/docker/start.sh"]
