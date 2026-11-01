@@ -45,7 +45,7 @@ RUN set -eux; \
     mkdir -p "${OPENCLAW_REPO_DIR}"; \
     curl -fsSL "${tarball}" | tar -xz --strip-components=1 -C "${OPENCLAW_REPO_DIR}"; \
     cd "${OPENCLAW_REPO_DIR}"; \
-    npm install --omit=dev --no-audit --no-fund --engine-strict=false; \
+    npm install --omit=dev --no-audit --no-fund --engine-strict=false --legacy-peer-deps; \
     printf '%s\n' "${version}" > "${OPENCLAW_REPO_DIR}/.openclaw-build-ref"; \
     npm cache clean --force
 
