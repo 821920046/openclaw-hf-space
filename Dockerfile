@@ -49,6 +49,24 @@ RUN set -eux; \
     printf '%s\n' "${version}" > "${OPENCLAW_REPO_DIR}/.openclaw-build-ref"; \
     npm cache clean --force
 
+# --- 镜像瘦身：删除运行时用不到的纯元数据（约 -95MB）---
+# 每一类都核对过引用关系，不是凭感觉删：
+#   *.map   source map，只影响堆栈可读性。dist 内的 js 中 sourceMappingURL 出现次数为 0，
+#           这些 map 全在 node_modules 里，纯冗余。
+#   *.d.ts  TypeScript 类型声明，Node 运行时从不读取（package.json 的 types 字段只给编译器用）。
+#   *.md    各依赖的 README/CHANGELOG。保留 LICENSE/COPYING/NOTICE 以满足许可证合规。
+#   docs/   官方文档目录，运行时不读取。
+# 刻意不动 dist/ 下的任何文件：dist/postinstall-content-inventory.json 会按 sha256+size
+# 逐文件校验 dist 树（comparePackageDistContentInventory），删 dist 里的东西可能在
+# 后续 package lifecycle 检查时抛 "Invalid package dist content inventory"。
+RUN set -eux; \
+    rm -rf "${OPENCLAW_REPO_DIR}/docs"; \
+    find "${OPENCLAW_REPO_DIR}/node_modules" -type f -name "*.map" -delete; \
+    find "${OPENCLAW_REPO_DIR}/node_modules" -type f -name "*.d.ts" -delete; \
+    find "${OPENCLAW_REPO_DIR}/node_modules" -type f -name "*.md" \
+        ! -iname "license*" ! -iname "copying*" ! -iname "notice*" -delete; \
+    du -sh "${OPENCLAW_REPO_DIR}"
+
 WORKDIR /app
 COPY docker/nginx.conf /etc/nginx/nginx.conf
 COPY docker/start.sh /app/docker/start.sh

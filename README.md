@@ -369,7 +369,44 @@ docker run --rm -p 7860:7860 \
 **回滚**：把 Dockerfile 里 `ARG OPENCLAW_NPM_VERSION="latest"` 改成具体版本号（例如 `"2026.10.9"`），重新上传 Dockerfile 并重建即可。
 
 
-## 故障排除
+## 资源占用与优化
+
+免费版 Space 的瓶颈是内存和临时磁盘，不是 CPU。优化之前先量，别猜。
+
+### 先看数据：`/admin/api/system`
+
+控制台顶部会显示实时内存与磁盘；接口原始输出：
+
+```bash
+curl -u admin:你的密码 https://<你的空间>.hf.space/admin/api/system
+```
+
+返回四块：`memory`（含 cgroup 限额与实际用量）、`processes`（每个常驻进程的 RSS）、
+`disk`（总量/已用/百分比）、`directories`（`openclaw_home` / `repo` / `tmp_logs` 的体积与文件数）。
+
+### 已做的优化
+
+| 项 | 做法 | 收益 | 依据 |
+|---|---|---|---|
+| 内置插件 | `plugins.deny` 关闭 8 个启动即加载但本部署用不到的插件 | 减少 Node 堆常驻 | 66 个内置插件中 40 个 `enabledByDefault=true`，但只有 12 个 `activation.onStartup≠false`；被关掉的 anthropic / openai / ollama / cua-computer / github / geolocation / browser / canvas 在本部署中无 API Key、无配置项、无通道 |
+| 状态归档缓存 | 恢复完成后删除 `hf_hub_download` 落在 `~/.cache/huggingface` 的归档 | 等于整个状态归档大小 | 免费版容器磁盘每次重启都是全新的，该缓存在同一次启动内下载完即无二次读取机会 |
+| 镜像瘦身 | 删除 `docs/`、`node_modules` 下的 `*.map` / `*.d.ts` / `*.md`（保留 LICENSE） | 约 -95MB | `dist/` 内 js 的 `sourceMappingURL` 引用数为 0；`.d.ts` 只给编译器用；`docs/` 运行时不读取 |
+
+**刻意没做的**（都核对过，收益不抵风险）：
+
+- 删 `dist/` 内的文件 —— `dist/postinstall-content-inventory.json` 会按 sha256 逐文件校验 dist 树，动了可能抛 `Invalid package dist content inventory`。
+- 删 `dist/control-ui/assets` 里的 `.gz`/`.br` —— 网关会读这些预压缩 sidecar，删了不报错但会退化成 nginx 运行时压缩，2 vCPU 上不划算。
+- 删 `dist/worker-artifacts/*.tar.gz` —— 是内容寻址的 worker 缓存，缺失可能触发重建。
+- 合并三个 Python 服务 —— 只省十几 MB，却要动备份链路，不划算。
+- `OPENCLAW_SKIP_STARTUP_MODEL_PREWARM` —— 源码里只有内部子进程写这个变量，没有任何地方读它，纯安慰剂。
+
+### 可调开关
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `OPENCLAW_PLUGIN_DENY` | 内置 8 项列表 | 逗号分隔的插件禁用列表。设为空字符串即全部不禁用（免重建回滚）。加了 `OPENAI_API_KEY` 之类就要把对应插件从列表里去掉 |
+| `OPENCLAW_HF_STATE_SYNC_INTERVAL` | `1800` | 状态自动同步间隔（秒），`0` 关闭 |
+| `NODE_OPTIONS` | 未设 | 可直接设 `--max-old-space-size=1536` 限制 V8 堆上限。**注意**：设太小会让长上下文会话 OOM 崩溃，建议先用 `/admin/api/system` 观察实际峰值再定 |
 
 ### 构建阶段
 

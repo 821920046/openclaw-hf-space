@@ -4,6 +4,7 @@ import sys
 import json
 import glob
 import time
+import shutil
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -93,6 +94,146 @@ def get_openclaw_version():
         "error": error,
     }
 
+def _read_proc_kb(path, key):
+    """从 /proc 下形如 '<key>:  <n> kB' 的文件里取值，读不到返回 None。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith(key + ":"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _cgroup_memory():
+    """返回 (limit_bytes, used_bytes)。v2 优先，回退 v1；无限制或读不到返回 None。"""
+    for limit_path, used_path in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
+         "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        try:
+            with open(limit_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            limit = None if raw == "max" else int(raw)
+            with open(used_path, "r", encoding="utf-8") as f:
+                used = int(f.read().strip())
+            # cgroup v1 在「无限制」时给一个天文数字，归一化成 None
+            if limit is not None and limit > (1 << 60):
+                limit = None
+            return limit, used
+        except (OSError, ValueError):
+            continue
+    return None, None
+
+
+# 常驻进程匹配规则：cmdline 里同时出现这些子串才算命中
+PROC_MATCHERS = (
+    ("gateway", ("dist/index.js", "gateway")),
+    ("openrouter_proxy", ("openrouter_proxy.py",)),
+    ("admin_api", ("admin_api.py",)),
+    ("backup_api", ("backup_api.py",)),
+    ("nginx", ("nginx:",)),
+)
+
+
+def _proc_rss():
+    """按 cmdline 匹配常驻进程，返回 (进程列表, RSS 合计 MB)。"""
+    found = []
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return found, 0.0
+    for pid in pids:
+        try:
+            with open("/proc/" + pid + "/cmdline", "rb") as f:
+                cmd = f.read().decode("utf-8", "replace").replace("\x00", " ").strip()
+        except OSError:
+            continue
+        if not cmd:
+            continue
+        for name, needles in PROC_MATCHERS:
+            if all(n in cmd for n in needles):
+                rss_kb = _read_proc_kb("/proc/" + pid + "/status", "VmRSS")
+                found.append({
+                    "name": name,
+                    "pid": int(pid),
+                    "rss_mb": round((rss_kb or 0) / 1024.0, 1),
+                    "cmd": cmd[:180],
+                })
+                break
+    return found, round(sum(p["rss_mb"] for p in found), 1)
+
+
+def _dir_size_mb(path, max_files=20000):
+    """有上限的目录体积统计，避免在超大目录上把 admin 接口卡死。"""
+    total = 0
+    count = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+            count += 1
+            if count >= max_files:
+                return round(total / 1048576.0, 1), count, True
+    return round(total / 1048576.0, 1), count, False
+
+
+def get_system_stats():
+    """运行时可观测性：内存 / 进程 RSS / 磁盘。
+
+    优化必须建立在数据上。之前"感觉太耗内存"无法定位到具体进程，
+    这个接口把 cgroup 限额、每个常驻进程的 RSS、各目录体积一次性摊开。
+    """
+    mem_total = _read_proc_kb("/proc/meminfo", "MemTotal")
+    mem_avail = _read_proc_kb("/proc/meminfo", "MemAvailable")
+    cg_limit, cg_used = _cgroup_memory()
+    procs, rss_total = _proc_rss()
+
+    home = os.environ.get("OPENCLAW_HOME", "/root/.openclaw")
+    repo = os.environ.get("OPENCLAW_REPO_DIR", "/app/openclaw")
+    directories = {}
+    for label, path in (
+        ("openclaw_home", home),
+        ("repo", repo),
+        ("tmp_logs", "/tmp/openclaw"),
+    ):
+        size_mb, files, truncated = _dir_size_mb(path)
+        directories[label] = {
+            "path": path,
+            "mb": size_mb,
+            "files": files,
+            "truncated": truncated,
+        }
+
+    try:
+        du = shutil.disk_usage("/")
+        disk = {
+            "total_gb": round(du.total / 1e9, 1),
+            "used_gb": round(du.used / 1e9, 1),
+            "free_gb": round(du.free / 1e9, 1),
+            "used_pct": round(du.used * 100.0 / du.total, 1),
+        }
+    except OSError:
+        disk = {}
+
+    return {
+        "memory": {
+            "host_total_mb": round(mem_total / 1024.0, 1) if mem_total else None,
+            "host_available_mb": round(mem_avail / 1024.0, 1) if mem_avail else None,
+            "cgroup_limit_mb": round(cg_limit / 1048576.0, 1) if cg_limit else None,
+            "cgroup_used_mb": round(cg_used / 1048576.0, 1) if cg_used else None,
+            "tracked_process_rss_mb": rss_total,
+        },
+        "processes": procs,
+        "disk": disk,
+        "directories": directories,
+    }
+
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -144,6 +285,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
     <div class="header">
         <h1>🤖 控制台 <span id="oc-version" style="font-size:0.7rem;font-weight:400;color:#9ca3af;margin-left:0.4rem;white-space:nowrap;"></span></h1>
+        <div id="sys-stats" style="font-size:0.7rem;color:#6b7280;margin-top:0.3rem;"></div>
         <div class="tabs">
             <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn active">运行日志</button>
             <button onclick="switchTab('env')" id="tab-env" class="tab-btn">变量设置</button>
@@ -367,9 +509,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
+        // 顶部显示实时资源占用。优化和排障都以这里的数字为准，不靠感觉。
+        async function fetchSystemStats() {
+            const el = document.getElementById('sys-stats');
+            if (!el) return;
+            try {
+                const res = await fetch('/admin/api/system');
+                const d = await res.json();
+                const m = d.memory || {}, k = d.disk || {};
+                const parts = [];
+                if (m.cgroup_used_mb != null) {
+                    parts.push(`内存 ${m.cgroup_used_mb}${m.cgroup_limit_mb ? ' / ' + m.cgroup_limit_mb : ''} MB`);
+                }
+                if (m.tracked_process_rss_mb) parts.push(`进程 RSS ${m.tracked_process_rss_mb} MB`);
+                if (k.used_pct != null) parts.push(`磁盘 ${k.used_gb} / ${k.total_gb} GB（${k.used_pct}%）`);
+                el.textContent = parts.join(' · ');
+            } catch (e) {
+                el.textContent = '';
+            }
+        }
+
         // Init
         switchTab('logs');
         fetchOpenClawVersion();
+        fetchSystemStats();
+        setInterval(fetchSystemStats, 30000);
     </script>
 </body>
 </html>"""
@@ -432,6 +596,13 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         if path == '/admin/api/openclaw-version':
             self.send_json(get_openclaw_version())
+            return
+
+        if path == '/admin/api/system':
+            try:
+                self.send_json(get_system_stats())
+            except Exception as e:
+                self.send_json({"error": str(e)}, status=500)
             return
 
         if path == '/admin/api/free-models':

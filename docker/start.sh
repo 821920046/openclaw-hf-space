@@ -459,6 +459,25 @@ export BROWSER_CONTROL_TOKEN="${BROWSER_CONTROL_TOKEN:-openclaw_static_token}"
 export OPENROUTER_API_KEYS="${OPENROUTER_API_KEY:-${OPENROUTER_API_KEYS:-}}"
 export OPENROUTER_FREE_MODELS_FILE="${OPENROUTER_FREE_MODELS_FILE:-/app/docker/free-models.json}"
 
+# --- 5a. 插件禁用列表（内存优化）---
+# 事实依据：2026.10.9 的 dist/extensions 里有 66 个内置插件，其中 40 个 enabledByDefault=true。
+# 配置里不设 plugins.allow 时，这些插件全部按默认启用；但真正会「启动即加载」的只有
+# 清单里 activation.onStartup 不为 false 的那 12 个——其余是懒加载，不占常驻内存。
+# 那 12 个里，browser / canvas / cua-computer / anthropic / openai / ollama / github /
+# geolocation 在本部署中无任何用途（无对应 API Key、无对应配置项、无对应通道），
+# 白白把各自的 SDK 拉进 Node 堆。plugins.deny 的优先级高于 entries 与默认启用
+# （见 config-state 中 resolvePluginActivationStateShared 的判定顺序），所以用 deny 精准关闭。
+# 回滚方式：在 HF 变量里设 OPENCLAW_PLUGIN_DENY=（空字符串）即可全部不禁用，无需重建镜像。
+DEFAULT_PLUGIN_DENY="anthropic,browser,canvas,cua-computer,geolocation,github,ollama,openai,phone-control"
+if [ -v OPENCLAW_PLUGIN_DENY ]; then
+  PLUGIN_DENY_RAW="${OPENCLAW_PLUGIN_DENY}"
+  echo "[plugins] 使用 OPENCLAW_PLUGIN_DENY 覆盖默认禁用列表"
+else
+  PLUGIN_DENY_RAW="${DEFAULT_PLUGIN_DENY}"
+fi
+export PLUGIN_DENY_JSON="$(node -e 'const s = process.env.PLUGIN_DENY_RAW || ""; process.stdout.write(JSON.stringify(s.split(",").map(x => x.trim()).filter(Boolean)));' 2>/dev/null || echo "[]")"
+echo "[plugins] deny = ${PLUGIN_DENY_JSON}"
+
 node -e '
   const fs = require("fs");
   const path = require("path");
@@ -477,6 +496,7 @@ node -e '
     .replace(/\$\{FEISHU_DOMAIN\}/g, getEnv("FEISHU_DOMAIN", "feishu"))
     .replace(/\$\{FEISHU_DM_POLICY\}/g, getEnv("FEISHU_DM_POLICY", "pairing"))
     .replace(/\$\{FEISHU_ALLOW_FROM_JSON\}/g, getEnv("FEISHU_ALLOW_FROM_JSON", "[]"))
+    .replace(/\$\{PLUGIN_DENY_JSON\}/g, getEnv("PLUGIN_DENY_JSON", "[]"))
     .replace(/\$\{BROWSER_CONTROL_TOKEN\}/g, getEnv("BROWSER_CONTROL_TOKEN"))
     .replace(/\$\{DASHSCOPE_API_KEY\}/g, getEnv("DASHSCOPE_API_KEY"))
     .replace(/\$\{SILICONFLOW_API_KEY\}/g, getEnv("SILICONFLOW_API_KEY"))
@@ -644,9 +664,12 @@ node -e '
           console.log("[config] Preserved user section: " + key);
         }
       }
-      // plugins 段：只继承"模板里已声明的插件 id 的 enabled 开关"，不带任何旧键
+      // plugins 段：只继承"模板里已声明的插件 id 的 enabled 开关"，不带任何旧键。
+      // 但绝不把模板显式关掉的插件重新打开：模板里 enabled:false 的是高内存插件
+      // （browser / canvas），旧配置若曾把它们设为 true，继承过来会让内存优化失效。
       if (old.plugins && old.plugins.entries && cfg.plugins && cfg.plugins.entries) {
         for (const pid of Object.keys(cfg.plugins.entries)) {
+          if (cfg.plugins.entries[pid].enabled === false) continue;
           const oe = old.plugins.entries[pid];
           if (oe && typeof oe === "object" && typeof oe.enabled === "boolean") {
             cfg.plugins.entries[pid].enabled = oe.enabled;

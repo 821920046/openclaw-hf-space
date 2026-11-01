@@ -46,14 +46,14 @@
     }
   },
   "plugins": {
+    "deny": ${PLUGIN_DENY_JSON},
     "entries": {
       "feishu": { "enabled": true },
       "file-transfer": { "enabled": true },
       "memory-core": { "enabled": true },
       "talk-voice": { "enabled": true },
       "browser": { "enabled": false },
-      "canvas": { "enabled": false },
-      "phone-control": { "enabled": false }
+      "canvas": { "enabled": false }
     }
   },
   "skills": {

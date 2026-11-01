@@ -157,6 +157,26 @@ def command_restore(args: argparse.Namespace) -> int:
 
     restored_files = sum(1 for _ in args.home.rglob("*") if _.is_file())
     log(f"restored {args.home} from {args.repo_type} repo {args.repo_id} ({args.archive_name}, {restored_files} files)")
+
+    # 清理下载缓存：hf_hub_download 会把归档落到 ~/.cache/huggingface/hub 的 blobs 里，
+    # 且本脚本从不删除它。免费版 Space 的容器磁盘每次重启都是全新的，这个缓存在同一次
+    # 启动里下载完就再也没有第二次读取机会——它纯粹是在整个会话期间白占一份与状态归档
+    # 等大的磁盘（状态越大浪费越大，几十 GB 的状态仓库就是几十 GB 的死重）。
+    # 注意：必须在 compute_sha256 之后再删，否则 hash 缓存会拿到空文件。
+    try:
+        freed = 0
+        blob_path = archive_path.resolve()
+        for target in (blob_path, archive_path):
+            try:
+                freed += target.stat().st_size
+                target.unlink()
+            except FileNotFoundError:
+                continue
+        log(f"cleaned cached state archive ({freed / 1048576.0:.1f} MB freed)")
+    except OSError as exc:
+        # 清理失败不影响状态正确性，只损失磁盘
+        log(f"WARNING: could not clean cached state archive: {exc}")
+
     return 0
 
 
