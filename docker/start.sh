@@ -697,10 +697,13 @@ node -e '
 ' "${template_path}"
 
 # --- 6. 飞书插件补全 ---
-FEISHU_DIR="/app/openclaw/dist/extensions/feishu"
-if [ -d "$FEISHU_DIR" ] && [[ ! -f "$FEISHU_DIR/index.js" && ! -f "$FEISHU_DIR/dist/index.js" ]]; then
+FEISHU_DIR="${OPENCLAW_REPO_DIR}/dist/extensions/feishu"
+# npm 官方包不内置 feishu 扩展（源码构建时会自带目录），这里主动创建，
+# 否则下面的下载分支会被跳过，飞书通道直接不可用。
+mkdir -p "$FEISHU_DIR"
+if [[ ! -f "$FEISHU_DIR/index.js" && ! -f "$FEISHU_DIR/dist/index.js" ]]; then
   # 读取 Docker 构建时写入的版本 ref，匹配对应的飞书插件版本
-  BUILD_REF=$(cat /app/openclaw/.openclaw-build-ref 2>/dev/null || echo "")
+  BUILD_REF=$(cat "${OPENCLAW_REPO_DIR}/.openclaw-build-ref" 2>/dev/null || echo "")
   NPM_VERSION="${BUILD_REF#v}"                           # v2026.5.3-1 → 2026.5.3-1
   NPM_VERSION_BASE="${NPM_VERSION%-*}"                   # 2026.5.3-1 → 2026.5.3
 
@@ -788,7 +791,7 @@ done
 # 旧版飞书插件不仅 require('root-alias.cjs')，还访问子模块如 root-alias.cjs/channel-message。
 # 若插件引用子模块 → root-alias.cjs 必须是目录（含 package.json + 软链接）
 # 若插件不引用子模块（版本匹配的常见情况）→ 简单重导出文件即可
-PLUGIN_SDK_DIR="/app/openclaw/dist/plugin-sdk"
+PLUGIN_SDK_DIR="${OPENCLAW_REPO_DIR}/dist/plugin-sdk"
 if [ -d "$PLUGIN_SDK_DIR" ]; then
   # 清理旧格式：文件、软链接、目录
   rm -rf "$PLUGIN_SDK_DIR/root-alias.cjs" 2>/dev/null || true

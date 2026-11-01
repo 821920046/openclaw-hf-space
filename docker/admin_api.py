@@ -3,6 +3,8 @@ import os
 import sys
 import json
 import glob
+import time
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
@@ -44,6 +46,52 @@ EDITABLE_VARS = [
     "BASIC_AUTH_PASSWORD",
     "OPENCLAW_DEFAULT_MODEL"
 ]
+
+# OpenClaw 版本信息缓存：npm 查询结果保留 1 小时，避免每次打开控制台都打网络
+_oc_version_cache = {"ts": 0.0, "latest": None}
+
+
+def _npm_latest_openclaw():
+    """查询 npm 上 openclaw 的最新稳定版（失败抛异常，由调用方兜底）。"""
+    now = time.time()
+    if _oc_version_cache["latest"] and now - _oc_version_cache["ts"] < 3600:
+        return _oc_version_cache["latest"]
+    req = urllib.request.Request(
+        "https://registry.npmjs.org/openclaw/latest",
+        headers={"User-Agent": "openclaw-admin"},
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        latest = json.loads(resp.read().decode("utf-8")).get("version")
+    if latest:
+        _oc_version_cache.update(ts=now, latest=latest)
+    return latest
+
+
+def get_openclaw_version():
+    """当前安装版本 vs npm 最新版，供控制台展示是否需要升级。"""
+    current = ""
+    ref_path = os.path.join(
+        os.environ.get("OPENCLAW_REPO_DIR", "/app/openclaw"), ".openclaw-build-ref"
+    )
+    try:
+        with open(ref_path, "r", encoding="utf-8") as f:
+            current = f.read().strip()
+    except OSError:
+        pass
+
+    latest = None
+    error = None
+    try:
+        latest = _npm_latest_openclaw()
+    except Exception as e:
+        error = str(e)
+
+    return {
+        "current": current,
+        "latest": latest,
+        "update_available": bool(current and latest and current != latest),
+        "error": error,
+    }
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -95,7 +143,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <div class="header">
-        <h1>🤖 控制台</h1>
+        <h1>🤖 控制台 <span id="oc-version" style="font-size:0.7rem;font-weight:400;color:#9ca3af;margin-left:0.4rem;white-space:nowrap;"></span></h1>
         <div class="tabs">
             <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn active">运行日志</button>
             <button onclick="switchTab('env')" id="tab-env" class="tab-btn">变量设置</button>
@@ -302,8 +350,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
+        // 顶部显示当前 OpenClaw 版本；有新版本时提示"可升级"（重建 Space 即安装最新版）
+        async function fetchOpenClawVersion() {
+            const el = document.getElementById('oc-version');
+            try {
+                const res = await fetch('/admin/api/openclaw-version');
+                const d = await res.json();
+                if (!d.current) { el.textContent = ''; return; }
+                if (d.update_available) {
+                    el.innerHTML = `v${d.current} → v${d.latest} <span style="color:#d97706;font-weight:600;">可升级</span>`;
+                } else {
+                    el.textContent = `v${d.current}（最新）`;
+                }
+            } catch (e) {
+                el.textContent = '';
+            }
+        }
+
         // Init
         switchTab('logs');
+        fetchOpenClawVersion();
     </script>
 </body>
 </html>"""
@@ -362,6 +428,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             for k in EDITABLE_VARS:
                 env_data[k] = os.environ.get(k, "")
             self.send_json(env_data)
+            return
+
+        if path == '/admin/api/openclaw-version':
+            self.send_json(get_openclaw_version())
             return
 
         if path == '/admin/api/free-models':

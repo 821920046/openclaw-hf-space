@@ -1,66 +1,10 @@
-FROM node:24-bookworm AS builder
+FROM node:24-bookworm-slim
 
-ARG OPENCLAW_REPO="https://github.com/openclaw/openclaw.git"
-ARG OPENCLAW_REF="v2026.6.5"
-ARG OPENCLAW_STABLE_REFRESH="2026-06-09"
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-ENV PATH="/root/.bun/bin:/src/openclaw/node_modules/.bin:${PATH}"
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        git \
-        openssl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN corepack enable
-
-WORKDIR /tmp
-RUN curl -fsSL https://bun.sh/install | bash
-
-WORKDIR /src
-RUN if [ "${OPENCLAW_REF}" = "stable" ]; then \
-        echo "Resolving latest stable tag (refresh hint: ${OPENCLAW_STABLE_REFRESH})"; \
-        resolved_ref="$(git ls-remote --tags --refs "${OPENCLAW_REPO}" \
-          | awk '{print $2}' \
-          | sed 's#refs/tags/##' \
-          | grep -E '^v[0-9]+(\.[0-9]+)*(-[0-9]+)?$' \
-          | sort -rV \
-          | head -n 1)"; \
-      else \
-        resolved_ref="${OPENCLAW_REF}"; \
-      fi \
-    && test -n "${resolved_ref}" \
-    && echo "Checking out OpenClaw ref: ${resolved_ref}" \
-    && git clone --depth 1 --branch "${resolved_ref}" "${OPENCLAW_REPO}" openclaw \
-    && printf '%s\n' "${resolved_ref}" > /tmp/openclaw-build-ref \
-    && git -C openclaw rev-parse HEAD > /tmp/openclaw-build-commit
-
-WORKDIR /src/openclaw
-RUN cp /tmp/openclaw-build-ref .openclaw-build-ref \
-    && cp /tmp/openclaw-build-commit .openclaw-build-commit
-
-RUN MAKEFLAGS="-j1" PNPM_CHILD_CONCURRENCY=1 pnpm install \
-    --no-frozen-lockfile \
-    --no-engine-strict \
-    --network-concurrency 1 \
-    && pnpm store prune
-
-RUN pnpm rebuild esbuild sharp
-
-# tsdown bundles 200+ entry points in one process — memory-heavy.
-# - sed caps DEFAULT_TSDOWN_MAX_OLD_SPACE_MB (tsdown ignores NODE_OPTIONS)
-# - OPENCLAW_RUN_NODE_SKIP_DTS_BUILD=1 skips .d.ts generation that gets
-#   deleted at the end anyway; saves ~30-40% heap during bundling
-RUN sed -i 's/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 12288/DEFAULT_TSDOWN_MAX_OLD_SPACE_MB = 4096/' scripts/tsdown-build.mjs
-RUN OPENCLAW_RUN_NODE_SKIP_DTS_BUILD=1 NODE_OPTIONS="--max-old-space-size=4096" pnpm build:docker
-RUN OPENCLAW_CONTROL_UI_BASE_PATH=/openclaw/ NODE_OPTIONS="--max-old-space-size=4096" pnpm ui:build
-
-
-FROM node:24-bookworm-slim AS runtime
+# OpenClaw 安装方式：npm 官方预构建包。
+# 相比源码构建（git clone + pnpm install + tsdown 打包，约 30-40 分钟），
+# 这种方式约 2-5 分钟，镜像体积也明显更小。
+# 取值："latest" 自动解析 npm 最新稳定版；也可指定具体版本号（如 2026.10.9）用于回滚。
+ARG OPENCLAW_NPM_VERSION="latest"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
@@ -91,8 +35,21 @@ RUN python3 -m pip install --break-system-packages --no-cache-dir \
     pydantic \
     httpx
 
+# 解压 npm 包到 OPENCLAW_REPO_DIR 并安装运行时依赖（仅 prod，不含 devDependencies）。
+# .openclaw-build-ref 记录实际安装版本，start.sh 用它匹配飞书插件版本、并在控制台展示。
+RUN set -eux; \
+    version="${OPENCLAW_NPM_VERSION}"; \
+    if [ "${version}" = "latest" ]; then version="$(npm view openclaw version --silent 2>/dev/null)"; fi; \
+    echo "Installing OpenClaw ${version}"; \
+    tarball="$(npm view "openclaw@${version}" dist.tarball --silent 2>/dev/null)"; \
+    mkdir -p "${OPENCLAW_REPO_DIR}"; \
+    curl -fsSL "${tarball}" | tar -xz --strip-components=1 -C "${OPENCLAW_REPO_DIR}"; \
+    cd "${OPENCLAW_REPO_DIR}"; \
+    npm install --omit=dev --no-audit --no-fund --engine-strict=false; \
+    printf '%s\n' "${version}" > "${OPENCLAW_REPO_DIR}/.openclaw-build-ref"; \
+    npm cache clean --force
+
 WORKDIR /app
-COPY --from=builder /src/openclaw /app/openclaw
 COPY docker/nginx.conf /etc/nginx/nginx.conf
 COPY docker/start.sh /app/docker/start.sh
 COPY docker/openclaw.template.json /app/docker/openclaw.template.json

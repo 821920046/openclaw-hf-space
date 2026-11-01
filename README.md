@@ -331,12 +331,12 @@ docker run --rm -p 7860:7860 \
 
 ## 文件说明
 
-- `Dockerfile`: OpenClaw 多阶段构建及运行镜像（已修正 skills 目录路径映射；runtime 阶段不安装编译链与未使用的 lark CLI，镜像更小、冷启动更快）
+- `Dockerfile`: 运行镜像（安装 OpenClaw npm 官方预构建包，不再源码编译；默认跟随 npm `latest`，构建约 2-5 分钟）
 - `docker/nginx.conf`: 边缘认证 + 反向代理 + WebSocket 支持（已开启 gzip 压缩和基础防暴破限速）
 - `docker/start.sh`: 运行时校验、配置生成、进程启动核心脚本（已内置智能配置合并、定期/关机状态同步与进程 Watchdog 监控）
 - `docker/openclaw.template.json`: 适配 Space 的 OpenClaw 配置模板（默认开启 `basic-memory` 记忆插槽）
 - `docker/hf-state-store.py`: 处理 Hugging Face 无盘环境下的状态持久化（支持指数退避重试、恢复完整性校验、备份垃圾排除）
-- `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志与修改环境变量
+- `docker/admin_api.py`: 提供移动端/网页控制台，用于实时查看日志、修改环境变量、查看 OpenClaw 当前版本与可升级提示
 - `docker/backup_api.py`: 提供状态备份 API 端点（`/api/backup`），用于手动触发状态导出
 - `docker/openrouter_proxy.py`: 实现多 Key 负载均衡、多线程并发转发、请求超时保护与 OpenRouter 代理故障转移
 - `docker/openrouter_models.py`: OpenRouter 免费模型监测（拉取目录 + 调用榜单，剔除下架/失效模型，按调用量输出 Top5）
@@ -356,51 +356,34 @@ docker run --rm -p 7860:7860 \
 
 ## 上游版本策略
 
-Docker 构建过程会从 GitHub 克隆 OpenClaw，检出指定的稳定标签，并按照镜像所需的顺序进行构建：`pnpm install`, `pnpm build`, `pnpm ui:build`。较新的 OpenClaw 将控制台 UI 放在仓库根目录的 `ui/` 下，因此镜像最后通过根目录脚本运行 `ui:build`，确保 `dist/control-ui/` 存在于最终运行镜像中，供 `node dist/index.js gateway` 使用。
+镜像**不再从源码编译** OpenClaw，而是直接安装 npm 官方预构建包：
 
-本模板默认使用：
+1. 构建时解析 `OPENCLAW_NPM_VERSION`（默认 `latest`，自动取 npm 上的最新稳定版）；
+2. 下载官方 tarball 解压到 `/app/openclaw`，再执行 `npm install --omit=dev` 安装运行时依赖；
+3. 实际安装版本写入 `/app/openclaw/.openclaw-build-ref`，供飞书插件版本匹配与控制台展示。
 
-- 仓库：`https://github.com/openclaw/openclaw.git`
-- 引用策略：默认固定到已知可构建的稳定标签（`OPENCLAW_REF=v2026.6.5`）
-- 缓存刷新提示：`ARG OPENCLAW_STABLE_REFRESH=2026-05-05`
+这样构建时间从源码编译的 30-40 分钟降到 **2-5 分钟**，镜像体积也明显更小，因此可以放心地频繁重建来跟上游。
 
-此处的“稳定版”指如下格式的标签：
+**升级方式**：在 HF Space 页面点 **Settings → Factory rebuild**（或重新上传文件后重建）即可安装当时的最新版。控制台标题旁会显示当前版本；若 npm 上已有更新版本，会显示 `v当前 → v最新 可升级`。
 
-- `v2026.5.3-1`
-- `v2026.4.2`
-- `v2026.3.24`
+**回滚**：把 Dockerfile 里 `ARG OPENCLAW_NPM_VERSION="latest"` 改成具体版本号（例如 `"2026.10.9"`），重新上传 Dockerfile 并重建即可。
 
-不包括预发行标签，如：
-
-- `v2026.4.2-beta.1`
-- `v2026.4.2-rc.1`
-
-本仓库目前在 `Dockerfile` 中默认使用 `ARG OPENCLAW_REF="v2026.6.5"`。这样可以避免 `stable` 自动跳到刚发布的上游标签后，被 pnpm 的 `minimumReleaseAge` 策略或新依赖变更打断构建。
-
-如果你以后想更改版本，请修改 `Dockerfile` 中的 `ARG OPENCLAW_REF=...` 为你想要的准确标签。
-
-重要提示：`stable` 仅在 Docker 镜像构建期间解析。Docker 层缓存可能导致 Hugging Face 在上游发布新标签后仍然使用旧的已解析标签。发生这种情况时：
-
-- 要固定某个准确版本，请在 `Dockerfile` 中设置 `ARG OPENCLAW_REF=v2026.x.y`。
-- 要刷新最新稳定标签的选择，请保持 `OPENCLAW_REF=stable` 并更改 `ARG OPENCLAW_STABLE_REFRESH=...` 的值，然后重新构建 Space。
-- 选定的引用（ref）和提交 ID（commit）会被写入镜像内的 `.openclaw-build-ref` 和 `.openclaw-build-commit` 中，并在启动时打印以便调试。镜像不再运行单独的 `pnpm ui:install` 步骤。
 
 ## 故障排除
 
 ### 构建阶段
 
-- **`git clone` 期间构建失败**
-  - 检查构建环境是否可以访问 GitHub。Hugging Face 构建服务器通常可以访问，但偶尔会出现网络波动。
-  - 如果反复失败，尝试在 `Dockerfile` 中将 `OPENCLAW_REPO` 换为镜像地址。
+- **`npm view` 或下载 tarball 失败**
+  - 检查构建环境能否访问 npm registry。Hugging Face 构建服务器通常可以，但偶有网络波动，重新构建一次即可。
 
-- **选择标签时构建失败**
-  - OpenClaw 可能更改了标签命名规则，或者仓库暂时没有可抓取的标签。
-  - 解决方案：在 `Dockerfile` 中固定到一个已知可用的标签（如 `ARG OPENCLAW_REF="v2026.6.5"`），不要使用 `stable`。
+- **指定版本不存在（`npm install` 报 ETARGET / 404）**
+  - 确认 `ARG OPENCLAW_NPM_VERSION` 填的是 npm 上真实存在的版本号；不确定时用默认的 `latest`。
 
-- **`pnpm install` 或 `pnpm build` 期间构建失败**
-  - OpenClaw 可能更改了工作区或构建脚本；如有需要，请回退到已知的正常版本。
-  - 常见原因：pnpm 的 `minimumReleaseAge` 策略拒绝了太新的包版本，或新依赖引入了原生编译需求。
-  - 解决方案：回退 `OPENCLAW_REF` 到上一个成功构建的版本。
+- **Node 版本不满足（engines 报错）**
+  - OpenClaw 要求 Node `>=24.22.1`。镜像基于 `node:24-bookworm-slim`，会随官方 tag 更新；若仍报错，把基础镜像改为更新的 24.x 版本标签。
+
+- **`postinstall` 失败**
+  - 该脚本负责清理旧依赖、修复运行时链接，随包一起发布（`scripts/postinstall-bundled-plugins.mjs`）。若失败，先确认包内 `dist/postinstall-inventory.json` 存在；必要时临时加 `--ignore-scripts` 跳过（会失去依赖清理，仅作应急）。
 
 ### 启动阶段
 
