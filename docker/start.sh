@@ -602,7 +602,9 @@ node -e '
     try {
       const old = JSON.parse(fs.readFileSync(preMergePath, "utf8"));
       // 保留的用户自定义段列表
-      const PRESERVE_KEYS = ["plugins", "skills", "memory", "extensions"];
+      // meta 里存放 doctor 写入的迁移标记（如 meta.migrations.webhookListeners），
+      // 不保留会导致每次重启都重新触发迁移检查、gateway 以 exit 78 拒绝启动。
+      const PRESERVE_KEYS = ["plugins", "skills", "memory", "extensions", "meta"];
       let merged = 0;
       for (const key of PRESERVE_KEYS) {
         if (old[key] && Object.keys(old[key]).length > 0) {
@@ -968,6 +970,29 @@ if [ "${LEGACY_IDENTITY_COUNT}" -eq 0 ]; then
   echo "[migrate] 未发现旧版设备身份文件，跳过"
 else
   echo "[migrate] 共处理 ${LEGACY_IDENTITY_COUNT} 个文件，备份在 ${OPENCLAW_HOME}/legacy-identity-backup"
+fi
+
+# --- 6e. 运行 doctor --fix 完成旧版状态迁移 ---
+# 新版对旧版状态有多项迁移检查（webhook listeners 配置、session store、cron 历史等），
+# 未完成时 gateway 会以 exit 78 拒绝启动并提示 "Run openclaw doctor --fix"。
+# 这里无提示执行一次，成功后按版本号写标记；同版本下次启动直接跳过，升级时自动重跑。
+DOCTOR_STAMP="${OPENCLAW_HOME}/.doctor-fix-version"
+CURRENT_BUILD_REF=$(cat "${OPENCLAW_REPO_DIR}/.openclaw-build-ref" 2>/dev/null || echo "unknown")
+if [ "${OPENCLAW_SKIP_DOCTOR_FIX:-0}" = "1" ]; then
+  echo "[migrate] OPENCLAW_SKIP_DOCTOR_FIX=1，跳过 doctor --fix"
+elif [ "$(cat "${DOCTOR_STAMP}" 2>/dev/null || true)" = "${CURRENT_BUILD_REF}" ]; then
+  echo "[migrate] 版本 ${CURRENT_BUILD_REF} 已完成迁移，跳过 doctor --fix"
+else
+  echo "[migrate] 运行 doctor --fix 完成状态迁移（版本 ${CURRENT_BUILD_REF}，最多 180 秒）..."
+  mkdir -p /tmp/openclaw
+  DOCTOR_LOG="/tmp/openclaw/doctor-fix.log"
+  if ( cd "${OPENCLAW_REPO_DIR}" && timeout 180 env HOME=/root node dist/index.js doctor --fix --non-interactive ) >> "${DOCTOR_LOG}" 2>&1; then
+    echo "${CURRENT_BUILD_REF}" > "${DOCTOR_STAMP}"
+    echo "[migrate] doctor --fix 完成，已标记版本 ${CURRENT_BUILD_REF}"
+  else
+    echo "[migrate] doctor --fix 未正常结束（超时或报错），继续启动"
+  fi
+  tail -n 40 "${DOCTOR_LOG}" 2>/dev/null || true
 fi
 
 # --- 7. 启动进程（带 Watchdog 监控）---
