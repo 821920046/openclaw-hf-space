@@ -21,6 +21,29 @@ fi
 # 不再只赌"优雅关闭"那一下——网页端改动最多 N 秒后即落盘到 HF 数据集，重启不再回滚。
 export OPENCLAW_HF_STATE_SYNC_INTERVAL="${OPENCLAW_HF_STATE_SYNC_INTERVAL:-1800}"
 
+# --- 2c. 全新状态模式（一次性，跨大版本升级时使用）---
+# 跨多个大版本升级时，旧 state 的迁移链条很长（设备身份 → webhook 配置 → session store
+# → 插件包收敛…），任何一环不通过，gateway 都会以 exit 78 拒绝启动并陷入重启循环。
+# 设置 OPENCLAW_FRESH_STATE=1 可跳过旧状态：保留 workspace（技能文件），清空 state 与旧配置，
+# 模型/飞书等配置由环境变量重建。旧备份仍在原 dataset 中，不会被删除。
+# 只生效一次：清空后写入标记，之后即使变量仍为 1 也不会再清（否则每次重启都丢会话）。
+# 需要再次重置时，删除 ${OPENCLAW_HOME}/.fresh-state-applied 即可。
+FRESH_STATE_MARKER="${OPENCLAW_HOME}/.fresh-state-applied"
+FRESH_STATE_APPLIED=0
+if [ "${OPENCLAW_FRESH_STATE:-0}" = "1" ]; then
+  if [ -f "${FRESH_STATE_MARKER}" ]; then
+    echo "[state] OPENCLAW_FRESH_STATE=1 已生效过（$(cat "${FRESH_STATE_MARKER}" 2>/dev/null || echo unknown)），本次不清空状态"
+  else
+    echo "[state] OPENCLAW_FRESH_STATE=1：使用全新状态（保留 workspace/skills，清空 state 与旧配置）"
+    rm -rf "${OPENCLAW_STATE_DIR}"
+    mkdir -p "${OPENCLAW_STATE_DIR}"
+    rm -f "${OPENCLAW_CONFIG_PATH}"
+    rm -f "${OPENCLAW_HOME}/.doctor-fix-version"
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "${FRESH_STATE_MARKER}"
+    FRESH_STATE_APPLIED=1
+  fi
+fi
+
 # --- 2b. 自动清理临时文件 (保留用户技能) ---
 echo "[cleanup] Purging /tmp/* ..."
 rm -rf /tmp/* 2>/dev/null || true
@@ -604,7 +627,10 @@ node -e '
       // 保留的用户自定义段列表
       // meta 里存放 doctor 写入的迁移标记（如 meta.migrations.webhookListeners），
       // 不保留会导致每次重启都重新触发迁移检查、gateway 以 exit 78 拒绝启动。
-      const PRESERVE_KEYS = ["plugins", "skills", "memory", "extensions", "meta"];
+      // 注意 plugins 不在其中：新版 PluginEntrySchema 是 strictObject（只允许
+      // enabled/hooks/subagent/llm/config），旧版配置里的 package/spec/path 等键
+      // 整段搬过来会让整份配置判定为 invalid。插件开关在下面单独按 id 继承。
+      const PRESERVE_KEYS = ["skills", "memory", "extensions", "meta"];
       let merged = 0;
       for (const key of PRESERVE_KEYS) {
         if (old[key] && Object.keys(old[key]).length > 0) {
@@ -618,15 +644,34 @@ node -e '
           console.log("[config] Preserved user section: " + key);
         }
       }
+      // plugins 段：只继承"模板里已声明的插件 id 的 enabled 开关"，不带任何旧键
+      if (old.plugins && old.plugins.entries && cfg.plugins && cfg.plugins.entries) {
+        for (const pid of Object.keys(cfg.plugins.entries)) {
+          const oe = old.plugins.entries[pid];
+          if (oe && typeof oe === "object" && typeof oe.enabled === "boolean") {
+            cfg.plugins.entries[pid].enabled = oe.enabled;
+            merged++;
+            console.log("[config] Inherited plugin toggle: " + pid + "=" + oe.enabled);
+          }
+        }
+      }
       // agents 段特殊处理：保留 custom agents，但 defaults 由模板控制
+      // 注意：新版 schema 要求 agents.entries 至少有一个 agent，空对象会让整份配置判定
+      // 为 invalid（"agents.entries must contain at least one configured agent"），
+      // 因此这里跳过空对象，并对 entries 做"以模板为主"的合并，保证 main 一定存在。
       if (old.agents) {
         cfg.agents = cfg.agents || {};
         for (const ak of Object.keys(old.agents)) {
-          if (ak !== "defaults") {
-            cfg.agents[ak] = old.agents[ak];
-            merged++;
-            console.log("[config] Preserved agent config: " + ak);
+          if (ak === "defaults") continue;
+          const ov = old.agents[ak];
+          if (ov && typeof ov === "object" && !Array.isArray(ov) && Object.keys(ov).length === 0) continue;
+          if (ak === "entries" && cfg.agents.entries && typeof cfg.agents.entries === "object" && !Array.isArray(cfg.agents.entries)) {
+            cfg.agents.entries = { ...ov, ...cfg.agents.entries };
+          } else {
+            cfg.agents[ak] = ov;
           }
+          merged++;
+          console.log("[config] Preserved agent config: " + ak);
         }
       }
       console.log("[config] Smart merge complete: " + merged + " user sections preserved.");
@@ -898,6 +943,23 @@ PROXYEOF
   fi
 fi
 
+# --- 5b. 配置自检 ---
+# 新版 OpenClaw 对 openclaw.json 是 strict schema 校验：任何一处多余/过时的键都会让整份配置
+# 判定为 invalid。而 gateway 对 invalid 配置只打一行
+#   "Config unavailable; using environment and default agent directory settings."
+# 随后 doctor --fix 因配置写不回去抛 ConfigMutationConflictError → 状态迁移永远做不完
+# → gateway exit 78 → 重启循环。这个失败链条全程没有一句"配置不合法"。
+# 这里主动跑一次官方校验，把错误明细直接打进启动日志。
+# 放在飞书插件就位之后：strict 校验会检查插件包是否存在，太早跑会误报 feishu 缺失。
+CONFIG_CHECK_LOG="/tmp/openclaw/config-validate.log"
+mkdir -p /tmp/openclaw
+if ( cd "${OPENCLAW_REPO_DIR}" && timeout 120 env HOME=/root node dist/index.js config validate ) > "${CONFIG_CHECK_LOG}" 2>&1; then
+  echo "[config] 自检通过（openclaw config validate）"
+else
+  echo "[config] WARNING: 配置自检未通过，gateway 可能拒绝启动。错误明细："
+  tail -n 30 "${CONFIG_CHECK_LOG}" 2>/dev/null || true
+fi
+
 # --- 6c. 清理 .env 中会导致 gateway 拒绝启动的路径类变量 ---
 # 新版 OpenClaw 启动时会重载 trusted dotenv；若 .env 改写了配置/状态选择类环境变量
 # （OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR / OPENCLAW_HOME / OPENCLAW_WORKSPACE_DIR 等），
@@ -978,7 +1040,9 @@ fi
 # 这里无提示执行一次，成功后按版本号写标记；同版本下次启动直接跳过，升级时自动重跑。
 DOCTOR_STAMP="${OPENCLAW_HOME}/.doctor-fix-version"
 CURRENT_BUILD_REF=$(cat "${OPENCLAW_REPO_DIR}/.openclaw-build-ref" 2>/dev/null || echo "unknown")
-if [ "${OPENCLAW_SKIP_DOCTOR_FIX:-0}" = "1" ]; then
+if [ "${FRESH_STATE_APPLIED}" = "1" ]; then
+  echo "[migrate] 全新状态模式（本次已清空），跳过 doctor --fix"
+elif [ "${OPENCLAW_SKIP_DOCTOR_FIX:-0}" = "1" ]; then
   echo "[migrate] OPENCLAW_SKIP_DOCTOR_FIX=1，跳过 doctor --fix"
 elif [ "$(cat "${DOCTOR_STAMP}" 2>/dev/null || true)" = "${CURRENT_BUILD_REF}" ]; then
   echo "[migrate] 版本 ${CURRENT_BUILD_REF} 已完成迁移，跳过 doctor --fix"
