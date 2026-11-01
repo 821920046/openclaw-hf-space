@@ -950,6 +950,26 @@ else:
 PY
 done
 
+# --- 6d. 迁移旧版设备身份文件 ---
+# 新版 OpenClaw 在启动时检查 <stateDir>/identity/device.json，发现旧版残留会抛
+# StartupMaintenanceRequiredError("state-migrations") 并 exit 78 拒绝启动：
+#   "Legacy device identity exists at ... Run openclaw doctor --fix before starting the gateway."
+# 从数据集恢复的旧状态里正带着这个文件。这里备份后移除，让新版在数据库里重新生成身份。
+LEGACY_IDENTITY_COUNT=0
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  mkdir -p "${OPENCLAW_HOME}/legacy-identity-backup"
+  cp -p "$f" "${OPENCLAW_HOME}/legacy-identity-backup/$(echo "$f" | tr '/' '_').$(date +%s)" 2>/dev/null || true
+  rm -f "$f"
+  LEGACY_IDENTITY_COUNT=$((LEGACY_IDENTITY_COUNT + 1))
+  echo "[migrate] 已移除旧版设备身份文件：$f"
+done < <(find "${OPENCLAW_HOME}" -path "*/identity/device.json*" -type f 2>/dev/null)
+if [ "${LEGACY_IDENTITY_COUNT}" -eq 0 ]; then
+  echo "[migrate] 未发现旧版设备身份文件，跳过"
+else
+  echo "[migrate] 共处理 ${LEGACY_IDENTITY_COUNT} 个文件，备份在 ${OPENCLAW_HOME}/legacy-identity-backup"
+fi
+
 # --- 7. 启动进程（带 Watchdog 监控）---
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER:-admin}" "${BASIC_AUTH_PASSWORD:-admin}"
@@ -970,11 +990,14 @@ echo "[startup] openrouter_proxy started (PID: ${proxy_pid})"
 
 cd "${OPENCLAW_REPO_DIR}"
 echo "[startup] Starting Gateway..."
-# 使用进程替换 >(tee) 而非管道 | tee：进程替换不影响 $! 的 PID 捕获，
-# 确保 Watchdog 拿到的是 node 进程 PID 而非 tee 的 PID。
-HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured > >(tee -a "${LOG_FILE}") 2>&1 &
+# 直接追加写日志文件：Node 写文件是同步的，process.exit() 不会丢掉未 flush 的输出。
+# 之前用 >(tee) 走管道，gateway 在 bootstrap 阶段 exit(1) 时错误信息被截断，
+# 日志里只剩 "The CLI command failed."，看不到根因。再由 tail 转发到容器标准输出。
+HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured >> "${LOG_FILE}" 2>&1 &
 gateway_pid=$!
 echo "[startup] Gateway started (PID: ${gateway_pid})"
+tail -n +1 -F "${LOG_FILE}" 2>/dev/null &
+gateway_log_tail_pid=$!
 
 python3 /app/docker/admin_api.py &
 admin_pid=$!
@@ -1032,7 +1055,7 @@ cleanup() {
       --repo-id "${OPENCLAW_HF_STATE_REPO}" \
       --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" || true
   fi
-  kill "${gateway_pid}" "${nginx_pid}" "${proxy_pid}" "${admin_pid}" "${backup_pid}" 2>/dev/null || true
+  kill "${gateway_pid}" "${nginx_pid}" "${proxy_pid}" "${admin_pid}" "${backup_pid}" ${gateway_log_tail_pid:+"${gateway_log_tail_pid}"} 2>/dev/null || true
   exit 0
 }
 trap cleanup EXIT INT TERM
@@ -1095,7 +1118,14 @@ while true; do
 
   # 检查 Gateway（核心进程，崩溃则退出容器让 HF 重启）
   if ! kill -0 "${gateway_pid}" 2>/dev/null; then
-    echo "[watchdog] CRITICAL: Gateway (PID: ${gateway_pid}) died! Exiting for container restart."
+    gateway_exit_code=0
+    wait "${gateway_pid}" 2>/dev/null || gateway_exit_code=$?
+    echo "[watchdog] CRITICAL: Gateway (PID: ${gateway_pid}) died (exit code: ${gateway_exit_code})! Exiting for container restart."
+    # exit 78 = 需要维护（状态迁移 / schema 不兼容），1 = 其他启动错误
+    # 补打日志尾部：确保退出前的错误一定出现在容器日志里
+    echo "[watchdog] ---- last 60 lines of gateway log ----"
+    tail -n 60 "${LOG_FILE}" 2>/dev/null || true
+    echo "[watchdog] ----------------------------------------"
     cleanup
   fi
 
