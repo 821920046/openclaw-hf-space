@@ -402,6 +402,20 @@ docker run --rm -p 7860:7860 \
   - 这是 OpenClaw 网关检测到配置文件变更后的正常日志，不是错误。
   - 如果每次启动都出现，说明启动脚本正在从模板重新生成配置，这是预期行为。
 
+- **`Config unavailable; using environment and default agent directory settings.` + gateway `exit 78` 反复重启**
+  - 含义是 `openclaw.json` **没通过新版的 strict schema 校验**，不是磁盘或权限问题。
+  - 后果链条：配置 invalid → gateway 读不到配置 → `doctor --fix` 写不回去（抛 `ConfigMutationConflictError`）→ `sessions.json` 迁移永远做不完 → gateway 以 `exit 78` 拒绝启动 → HF 重启 → 无限循环。
+  - 已在模板中修正的两处（跨大版本升级时最容易踩）：
+    1. 根级 `env` 必须是 `{ "vars": { ... } }`，不能是扁平键值；
+    2. `agents.entries` 至少要有一个 agent（如 `{ "main": {} }`）。
+  - 启动日志现在会输出 `[config] 自检通过` 或 `[config] WARNING: 配置自检未通过` 加错误明细，直接看这一段即可定位。
+
+- **跨大版本升级后一直 `exit 78`，迁移链条走不完**
+  - 在 Space 的 Settings → Variables 里加 `OPENCLAW_FRESH_STATE=1`，让新版用全新状态启动：保留 `workspace`（技能文件），清空 `state` 与旧配置，模型/飞书配置由环境变量重建。
+  - **只生效一次**：清空后会写 `.fresh-state-applied` 标记，之后即使变量仍为 `1` 也不会再清，不会每次重启丢会话。
+  - 需要再次重置时，删掉 `$OPENCLAW_HOME/.fresh-state-applied`（默认 `/root/.openclaw/.fresh-state-applied`）后重启。
+  - 旧状态仍完整保留在 HF 数据集里，不会被删除。
+
 - **`connect() failed (111: Connection refused) while connecting to upstream`**
   - Nginx 尝试代理请求到后端服务，但对应端口没有进程在监听。
   - 常见场景：
