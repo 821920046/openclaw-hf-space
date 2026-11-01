@@ -896,6 +896,60 @@ PROXYEOF
   fi
 fi
 
+# --- 6c. 清理 .env 中会导致 gateway 拒绝启动的路径类变量 ---
+# 新版 OpenClaw 启动时会重载 trusted dotenv；若 .env 改写了配置/状态选择类环境变量
+# （OPENCLAW_CONFIG_PATH / OPENCLAW_STATE_DIR / OPENCLAW_HOME / OPENCLAW_WORKSPACE_DIR 等），
+# 签名比对不一致会直接 exit 1 并拒绝启动：
+#   "Refusing to start the gateway because trusted dotenv reload after startup
+#    mutations changed config or state selection."
+# 这些路径本镜像统一由 start.sh 指定，因此从 .env 中剥离，原文件备份为 .env.bak。
+# openclaw 会加载 state 目录与 config 目录两处 .env（路径相同则只加载一次），两处都要清理
+for ENV_FILE in "${OPENCLAW_HOME}/.env" "${OPENCLAW_STATE_DIR}/.env"; do
+  if [ ! -f "${ENV_FILE}" ]; then
+    echo "[env] 未发现 ${ENV_FILE}，跳过"
+    continue
+  fi
+  python3 - "${ENV_FILE}" <<'PY'
+import shutil
+import sys
+
+SELECTION_KEYS = {
+    "ANDROID_DATA", "HOME", "HOMEDRIVE", "HOMEPATH",
+    "OPENCLAW_AGENT_DIR", "OPENCLAW_CONFIG_PATH", "OPENCLAW_HOME",
+    "OPENCLAW_INCLUDE_ROOTS", "OPENCLAW_CONFIG_READONLY", "OPENCLAW_NIX_MODE",
+    "OPENCLAW_OAUTH_DIR", "OPENCLAW_PACKAGE_DIR", "OPENCLAW_PROFILE",
+    "OPENCLAW_STATE_DIR", "OPENCLAW_WORKSPACE_DIR", "PI_CODING_AGENT_DIR",
+    "PREFIX", "USERPROFILE",
+}
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8", errors="replace") as f:
+    lines = f.readlines()
+
+kept, dropped = [], []
+for line in lines:
+    stripped = line.strip()
+    key = ""
+    if stripped and not stripped.startswith("#") and "=" in stripped:
+        key = stripped.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+    if key in SELECTION_KEYS:
+        dropped.append(key)
+        continue
+    kept.append(line)
+
+if dropped:
+    shutil.copyfile(path, path + ".bak")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+    print("[env] 从 .env 剥离路径类变量（否则 gateway 会拒绝启动）：" + ", ".join(sorted(set(dropped))))
+    print("[env] 原文件已备份为 .env.bak")
+else:
+    print("[env] .env 中无路径类变量，保持不变")
+PY
+done
+
 # --- 7. 启动进程（带 Watchdog 监控）---
 rm -f /etc/nginx/.htpasswd
 htpasswd -bc /etc/nginx/.htpasswd "${BASIC_AUTH_USER:-admin}" "${BASIC_AUTH_PASSWORD:-admin}"
