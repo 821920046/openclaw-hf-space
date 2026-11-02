@@ -221,9 +221,10 @@ fi
 
 # 全量重置（清除 gateway.db 等）仅在显式请求时执行
 if [[ "${OPENCLAW_RESET_STATE_ON_BOOT:-0}" == "1" ]]; then
-  echo "[reset] OPENCLAW_RESET_STATE_ON_BOOT=1 — purging ALL runtime state including gateway.db..."
+  echo "[reset] OPENCLAW_RESET_STATE_ON_BOOT=1 — purging ALL runtime state including gateway.db and agent sessions..."
   rm -rf "${OPENCLAW_HOME}/gateway.db"* 2>/dev/null || true
   rm -rf "${OPENCLAW_STATE_DIR}/gateway" 2>/dev/null || true
+  rm -rf "${OPENCLAW_STATE_DIR}/agents" 2>/dev/null || true
   find "${OPENCLAW_STATE_DIR}" -name "config-meta*" -delete 2>/dev/null || true
 else
   echo "[reset] gateway.db and pairing state preserved."
@@ -1155,17 +1156,23 @@ else
 fi
 last_fm_refresh=$(date +%s)
 
+GATEWAY_CRASHED=0
+
 # 优雅关闭：清理所有子进程
 cleanup() {
   echo "[shutdown] Cleaning up all processes..."
-  # 关闭前执行状态同步
+  # 关闭前执行状态同步（仅在正常停机时同步，网关异常崩溃时跳过，避免将毒化状态上传覆盖健康备份）
   if [[ "${hf_state_enabled}" == "1" ]]; then
-    echo "[shutdown] Performing final state sync..."
-    python3 /app/docker/hf-state-store.py save \
-      --reason shutdown \
-      --home "${OPENCLAW_HOME}" \
-      --repo-id "${OPENCLAW_HF_STATE_REPO}" \
-      --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" || true
+    if [[ "${GATEWAY_CRASHED}" == "1" ]]; then
+      echo "[shutdown] WARNING: Skipping final state sync because Gateway crashed abnormally; protecting remote dataset snapshot from poisoning."
+    else
+      echo "[shutdown] Performing final state sync..."
+      python3 /app/docker/hf-state-store.py save \
+        --reason shutdown \
+        --home "${OPENCLAW_HOME}" \
+        --repo-id "${OPENCLAW_HF_STATE_REPO}" \
+        --repo-type "${OPENCLAW_HF_STATE_REPO_TYPE:-dataset}" || true
+    fi
   fi
   kill "${gateway_pid}" "${nginx_pid}" "${proxy_pid}" "${admin_pid}" "${backup_pid}" ${gateway_log_tail_pid:+"${gateway_log_tail_pid}"} 2>/dev/null || true
   exit 0
@@ -1176,6 +1183,8 @@ trap cleanup EXIT INT TERM
 echo "[watchdog] Process monitoring started (interval: 30s)"
 echo "[watchdog] Periodic state autosave every ${sync_interval}s (0=disabled)"
 last_state_sync=$(date +%s)
+gateway_restart_count=0
+last_gateway_crash_ts=0
 while true; do
   sleep 30
 
@@ -1228,17 +1237,35 @@ while true; do
     fi
   fi
 
-  # 检查 Gateway（核心进程，崩溃则退出容器让 HF 重启）
+  # 检查 Gateway（核心进程：先尝试就地恢复拉起，若短时间内反复崩溃则退出容器并跳过状态同步）
   if ! kill -0 "${gateway_pid}" 2>/dev/null; then
     gateway_exit_code=0
     wait "${gateway_pid}" 2>/dev/null || gateway_exit_code=$?
-    echo "[watchdog] CRITICAL: Gateway (PID: ${gateway_pid}) died (exit code: ${gateway_exit_code})! Exiting for container restart."
-    # exit 78 = 需要维护（状态迁移 / schema 不兼容），1 = 其他启动错误
-    # 补打日志尾部：确保退出前的错误一定出现在容器日志里
+    echo "[watchdog] WARNING: Gateway (PID: ${gateway_pid}) died (exit code: ${gateway_exit_code})!"
     echo "[watchdog] ---- last 60 lines of gateway log ----"
     tail -n 60 "${LOG_FILE}" 2>/dev/null || true
     echo "[watchdog] ----------------------------------------"
-    cleanup
+
+    now_ts=$(date +%s)
+    # 超过 180 秒无崩溃，重置重试计数
+    if (( now_ts - last_gateway_crash_ts > 180 )); then
+      gateway_restart_count=0
+    fi
+    last_gateway_crash_ts=${now_ts}
+
+    # exit 78 为模式迁移冲突，不可原地重试；其他情况允许最多 2 次原地拉起
+    if [[ "${gateway_exit_code}" != "78" && ${gateway_restart_count} -lt 2 ]]; then
+      gateway_restart_count=$((gateway_restart_count + 1))
+      echo "[watchdog] Attempting in-container Gateway restart (${gateway_restart_count}/2)..."
+      cd "${OPENCLAW_REPO_DIR}"
+      HOME=/root node dist/index.js gateway --port 18789 --bind loopback --allow-unconfigured >> "${LOG_FILE}" 2>&1 &
+      gateway_pid=$!
+      echo "[watchdog] Gateway restarted (PID: ${gateway_pid})"
+    else
+      echo "[watchdog] CRITICAL: Gateway failed repeatedly or encountered fatal error (exit: ${gateway_exit_code})! Exiting container."
+      GATEWAY_CRASHED=1
+      cleanup
+    fi
   fi
 
   # 检查 OpenRouter Proxy（可恢复）
