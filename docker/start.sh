@@ -15,9 +15,9 @@ export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-openrouter/nvidia/nemot
 export SPACE_HOST="${SPACE_HOST:-localhost:7860}"
 
 # --- 1b. 免费服务器低负载与极速运行参数优化 ---
-# 对齐免费层 2 vCPU，消除多线程上下文切换空转；优化 V8 内存与平滑 GC，防卡顿与 OOM
+# 对齐免费层 2 vCPU，消除多线程上下文切换空转；限制 V8 内存上限，防 OOM 崩溃 (Exit 137)
 export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-2}"
-export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536 --optimize-for-size}"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536}"
 
 mkdir -p "${OPENCLAW_HOME}" "${OPENCLAW_STATE_DIR}" /var/log/nginx /var/lib/nginx /run/nginx
 
