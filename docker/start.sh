@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- 0. 安全防护守卫（防 Agent 误杀核心进程）---
+if [[ -f "/app/docker/security-guard.sh" ]]; then
+  bash /app/docker/security-guard.sh || true
+fi
+
 # --- 1. 基础环境配置 ---
 export OPENCLAW_HOME="${OPENCLAW_HOME:-/root/.openclaw}"
 export OPENCLAW_CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${OPENCLAW_HOME}/openclaw.json}"
@@ -171,6 +176,43 @@ fi
 # 统一使用 ${OPENCLAW_HOME}/workspace/skills 作为唯一技能目录
 export OPENCLAW_SKILLS_DIR="${OPENCLAW_HOME}/workspace/skills"
 mkdir -p "${OPENCLAW_SKILLS_DIR}"
+
+# 预置：自媒体与电商高频自动化专用技能
+mkdir -p "${OPENCLAW_SKILLS_DIR}/xiaohongshu-copywriting"
+cat > "${OPENCLAW_SKILLS_DIR}/xiaohongshu-copywriting/SKILL.md" << 'XHS_EOF'
+# 小红书爆款文案专家技能 (Xiaohongshu Copywriting Specialist)
+
+当你需要撰写、优化或拆解小红书笔记时激活此技能。
+
+## 核心任务与结构规范
+1. **封面与标题 (CTR > 15% 密码)**：
+   - 每次提供 5 个不同切入点的吸睛标题：
+     ① 悬念反差型；② 数字痛点型；③ 避坑揭秘型；④ 闺蜜安利型；⑤ 保姆级干货型。
+   - 标题长度严格控制在 18-20 字以内，带 1-2 个抓眼球 Emoji。
+2. **正文框架 (黄金三段式)**：
+   - 前 3 秒抓人钩子：直击痛点或抛出扎心场景（例：“求求你们别再盲目买XX了！”）；
+   - 干货价值交付：结构清晰，善用数字标号与分割线，高频穿插贴切的 Emoji 视觉锚点；
+   - 结尾情绪互动与行动召唤 (CTA)：引发评论区争议或求点赞收藏（例：“姐妹们觉得哪个更好看？留言区告诉我”）。
+3. **爆款标签矩阵**：
+   - 生成 5-8 个标签：核心词（品类）+ 场景词 + 痛点词 + 泛流量热搜词。
+XHS_EOF
+
+mkdir -p "${OPENCLAW_SKILLS_DIR}/ecommerce-review-analyzer"
+cat > "${OPENCLAW_SKILLS_DIR}/ecommerce-review-analyzer/SKILL.md" << 'ECOM_EOF'
+# 电商评价分析与金牌售后回复专家技能 (E-commerce Review & After-sales Pro)
+
+当你需要分析电商平台（淘宝、天猫、抖音、小红书店铺）买家评价、提炼差评痛点或撰写售后安抚话术时激活此技能。
+
+## 核心任务与回复策略
+1. **差评/中评智能归类**：
+   - 将用户诉求快速归类为：【物流破损/延误】、【商品质量/瑕疵】、【使用/操作疑问】、【尺寸/颜色偏差】、【客服态度】。
+2. **三步安抚回复法则 (极高挽回率)**：
+   - 第一步：100% 情绪共鸣（不推卸责任，真诚认同客户的不快感受）；
+   - 第二步：责任担当与行动方案（清晰说明补发、退货、补偿或技术指导的具体流程）；
+   - 第三步：长效关怀与服务承诺（提供专属 VIP 绿色售后通道，降低追评风险）。
+3. **违禁词防封合规**：
+   - 绝对避开各大电商平台严厉打击的敏感违禁词，采用符合平台规范的专业表达。
+ECOM_EOF
 
 # 如果旧路径 .openclaw/workspace/skills 下有内容，迁移到标准路径
 OLD_SKILLS="${OPENCLAW_HOME}/.openclaw/workspace/skills"

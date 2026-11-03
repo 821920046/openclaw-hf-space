@@ -117,6 +117,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         mark_key_unhealthy(key, f"auth_error_{r.status_code}", cooldown=300)
                         continue
 
+                    # 上游提供商临时过载或网关超时（如 503 Overloaded），换下一个 Key 快速重试
+                    if r.status_code in (502, 503, 504):
+                        mark_key_unhealthy(key, f"upstream_overload_{r.status_code}", cooldown=30)
+                        continue
+
                     self.send_response(r.status_code)
                     for hk, hv in r.headers.items():
                         if hk.lower() not in ("transfer-encoding", "content-encoding", "connection"):
