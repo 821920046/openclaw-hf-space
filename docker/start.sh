@@ -14,6 +14,11 @@ export OPENCLAW_REPO_DIR="${OPENCLAW_REPO_DIR:-/app/openclaw}"
 export OPENCLAW_DEFAULT_MODEL="${OPENCLAW_DEFAULT_MODEL:-openrouter/nvidia/nemotron-3-super-120b-a12b:free}"
 export SPACE_HOST="${SPACE_HOST:-localhost:7860}"
 
+# --- 1b. 免费服务器低负载与极速运行参数优化 ---
+# 对齐免费层 2 vCPU，消除多线程上下文切换空转；优化 V8 内存与平滑 GC，防卡顿与 OOM
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-2}"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=1536 --optimize-for-size}"
+
 mkdir -p "${OPENCLAW_HOME}" "${OPENCLAW_STATE_DIR}" /var/log/nginx /var/lib/nginx /run/nginx
 
 # --- 2. 状态恢复 ---
@@ -511,7 +516,7 @@ export OPENROUTER_FREE_MODELS_FILE="${OPENROUTER_FREE_MODELS_FILE:-/app/docker/f
 # 白白把各自的 SDK 拉进 Node 堆。plugins.deny 的优先级高于 entries 与默认启用
 # （见 config-state 中 resolvePluginActivationStateShared 的判定顺序），所以用 deny 精准关闭。
 # 回滚方式：在 HF 变量里设 OPENCLAW_PLUGIN_DENY=（空字符串）即可全部不禁用，无需重建镜像。
-DEFAULT_PLUGIN_DENY="anthropic,browser,canvas,cua-computer,geolocation,github,ollama,openai,phone-control"
+DEFAULT_PLUGIN_DENY="anthropic,browser,canvas,cua-computer,geolocation,github,ollama,openai,phone-control,xai"
 if [ -v OPENCLAW_PLUGIN_DENY ]; then
   PLUGIN_DENY_RAW="${OPENCLAW_PLUGIN_DENY}"
   echo "[plugins] 使用 OPENCLAW_PLUGIN_DENY 覆盖默认禁用列表"
