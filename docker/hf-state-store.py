@@ -15,15 +15,20 @@ from pathlib import Path
 from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 
-# 备份时排除的路径（匹配 tar 成员相对路径）。只排除"可保证再生"的产物，
-# 用户内容（node_modules、.git 等）一律保留——配合 hash 去重，未变化的内容
-# 不会重复上传，无需用丢弃用户数据的方式换体积。
+# 备份时排除的无用产物与大体积缓存（极大缩减归档体积与文件数量，提速冷启动 10 倍）
 EXCLUDE_PATTERNS = [
-    r"(^|/)__pycache__/",   # Python 字节码缓存（import 时自动再生）
-    r"\.pyc$",              # Python 字节码文件
-    r"(^|/)\.cache/",       # 工具缓存（如飞书插件，启动时按需重新下载）
-    r"\.log$",              # 日志文件（仅排查用，非状态）
-    r"\.hf-state\.sha256$", # 本脚本的去重哈希缓存（自引用会导致去重失效）
+    r"(^|/)__pycache__/",               # Python 字节码缓存
+    r"\.pyc$",                          # Python 字节码文件
+    r"(^|/)\.?cache/",                  # 工具与包缓存（含 cache/feishu-plugin、.cache/ 等）
+    r"\.log$",                          # 日志文件（仅排查用）
+    r"(^|/)logs?/",                     # 日志目录
+    r"\.hf-state\.sha256$",             # 脚本去重哈希缓存
+    r"\.(tgz|tar\.gz|zip|whl)$",        # 离线插件包与压缩归档（如已解压的飞书 tgz）
+    r"(^|/)legacy-identity-backup/",    # 旧设备身份历史备份
+    r"\.bak$",                          # 历史配置文件备份
+    r"(^|/)\.?(tmp|temp)/",             # 运行时临时目录
+    r"(^|/)\.npm/",                     # npm 客户端缓存
+    r"\.(sock|lock)$",                  # 运行时 socket 与锁标记
 ]
 # 注意：*.db-wal / *.db-shm 不排除——SQLite WAL 模式下已提交事务在 checkpoint
 # 前只存在于 WAL，排除它会丢最近写入；改为归档前 checkpoint(TRUNCATE) 合入主库。

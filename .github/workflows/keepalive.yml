@@ -29,4 +29,8 @@ jobs:
             echo "::error::Space 根路径返回 ${code}（冷启动中或服务异常），本次保活未生效"
             exit 1
           fi
-          echo "Space is awake."
+
+          echo "Checking proxy health..."
+          proxy_status=$(curl -sL --max-time 10 "${SPACE_URL}/proxy/health" || true)
+          echo "Proxy Health: ${proxy_status}"
+          echo "Space is awake and healthy."

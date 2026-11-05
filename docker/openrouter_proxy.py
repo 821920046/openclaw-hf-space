@@ -64,6 +64,45 @@ def mark_key_unhealthy(key: str, reason: str, cooldown: float = KEY_COOLDOWN) ->
     print(f"[Proxy] Key {key[:8]}... marked unhealthy: {reason} (cooldown {cooldown}s)")
 
 
+def compact_chat_messages(body_bytes: bytes, max_history: int = 16) -> bytes:
+    """对多轮对话进行滑动窗口压缩：
+    保留开头系统指令与最新的 max_history 条消息，防止 Token 滚雪球导致 429 限流或首字卡顿。
+    """
+    if not body_bytes or max_history <= 0:
+        return body_bytes
+    try:
+        data = json.loads(body_bytes.decode("utf-8"))
+        messages = data.get("messages")
+        if not isinstance(messages, list) or len(messages) <= max_history:
+            return body_bytes
+
+        # 提取开头的 system 消息（定义 Agent 设定与工具）
+        system_msgs = []
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "system":
+                system_msgs.append(m)
+            else:
+                break
+
+        # 截取尾部最新的 max_history 条消息
+        recent_msgs = messages[-max_history:]
+        recent_ids = {id(m) for m in recent_msgs}
+        final_system = [m for m in system_msgs if id(m) not in recent_ids]
+
+        omitted = len(messages) - len(final_system) - len(recent_msgs)
+        if omitted > 0:
+            notice = {
+                "role": "system",
+                "content": f"[上下文智能保护：为确保响应速度与避免超出模型配额，已自动压缩归档早期 {omitted} 条历史消息]"
+            }
+            data["messages"] = final_system + [notice] + recent_msgs
+            print(f"[Proxy] Context compacted: {len(messages)} -> {len(data['messages'])} messages (omitted {omitted})")
+            return json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except Exception as exc:
+        print(f"[Proxy] Context compaction skipped due to parse error: {exc}")
+    return body_bytes
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # 抑制默认日志（太嘈杂）
     def log_message(self, format, *args):
@@ -101,6 +140,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 body = routed
             if note:
                 model_router.log(note)
+
+            # 长上下文智能滑动窗口压缩（防 429 限流与首字卡顿，默认保留 16 条）
+            try:
+                max_ctx = int(os.environ.get("OPENCLAW_MAX_CONTEXT_MESSAGES", "16"))
+            except ValueError:
+                max_ctx = 16
+            if max_ctx > 0 and body:
+                body = compact_chat_messages(body, max_history=max_ctx)
 
         # 转发到 OpenRouter
         url = "https://openrouter.ai" + self.path
