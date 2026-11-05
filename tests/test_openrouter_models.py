@@ -180,4 +180,65 @@ rep2 = orm.build_report(cat, {}, {}, top_n=5, days=7, today=NOW, probed=False)
 assert rep2["primary"] is None and rep2["primary_status"] == "not_configured"
 print("T7 primary_status: PASS（转付费/过期/除名/路由入口/未配置全部正确）")
 
+# ---------- 8. primary_probe：探活结论只作观察，绝不改变切换判定 ----------
+cat8 = [
+    mk_model("vendor/alive:free", canonical="vendor/alive-20260101"),
+    mk_model("vendor/other:free", canonical="vendor/other-20260101"),
+]
+# 目录仍标记可用 + 探活失败 = "悄悄下线"场景：必须能告警，但绝不能触发切换/重启
+r8 = orm.build_report(cat8, {}, {"vendor/alive:free": ("dead", "404")},
+                      top_n=5, days=7, today=NOW, probed=True,
+                      primary_id="vendor/alive:free")
+assert r8["primary_probe"] == "dead", r8["primary_probe"]
+assert r8["primary_status"] == "ok", "探活失败绝不能触发切换/重启判定"
+r8b = orm.build_report(cat8, {}, {"vendor/alive:free": ("alive", "200")},
+                       top_n=5, days=7, today=NOW, probed=True,
+                       primary_id="vendor/alive:free")
+assert r8b["primary_probe"] == "alive"
+r8c = orm.build_report(cat8, {}, {}, top_n=5, days=7, today=NOW, probed=False,
+                       primary_id="vendor/alive:free")
+assert r8c["primary_probe"] == "skipped"          # 未配置 Key
+r8d = orm.build_report(cat8, {}, {}, top_n=5, days=7, today=NOW, probed=True)
+assert r8d["primary_probe"] is None                # 未配置主模型
+r8e = orm.build_report(cat8, {}, {}, top_n=5, days=7, today=NOW, probed=True,
+                       primary_id="vendor/other:free")
+assert r8e["primary_probe"] == "unknown"           # 主模型不在探测结果里，不能崩
+print("T8 primary_probe: PASS（dead 只告警不切换；alive/skipped/None/unknown 全部正确）")
+
+# ---------- 9. run_check 补探主模型 + 强制重跑继承 primary ----------
+import tempfile
+# 20 个免费候选，主模型 m19 调用量为 0，必然排在探测候选（前 15）之外
+cat9 = [mk_model(f"v/m{i}:free", canonical=f"v/m{i}-20260101") for i in range(20)]
+usage9 = {f"v/m{i}-20260101": {"requests": 100 - i, "tokens": 0} for i in range(15)}
+# 注入 Key 模拟真实容器：get_cached_result 强制重跑时 use_probe 取自环境变量
+with mock.patch.object(orm, "fetch_catalog", return_value=cat9), \
+     mock.patch.object(orm, "fetch_rankings", return_value=[]), \
+     mock.patch.object(orm, "aggregate_usage", return_value=usage9), \
+     mock.patch.dict("os.environ", {"OPENROUTER_API_KEYS": "test-key"}), \
+     mock.patch.object(orm, "probe_model", return_value=("alive", "HTTP 200")) as mp9:
+    with tempfile.TemporaryDirectory() as td:
+        out9 = Path(td) / "free-models.json"
+        rep9 = orm.run_check(out9, top_n=5, days=7, use_probe=True, primary_id="v/m19:free")
+        probed_ids = {c.args[0] for c in mp9.call_args_list}
+        assert "v/m19:free" in probed_ids, "主模型即使在 15 名外也必须单独补探"
+        assert len(probed_ids) == 16, len(probed_ids)
+        assert rep9["primary_probe"] == "alive"
+        assert rep9["primary_status"] == "ok"
+        assert rep9["stats"]["probed"] == 16
+        # 控制台「重新检测」不传 primary_id，必须从上次报告继承，否则主模型状态/告警会消失
+        rep9b = orm.get_cached_result(out9, max_age=600, force=True)
+        assert rep9b["primary"] == "v/m19:free", rep9b["primary"]
+        assert rep9b["primary_status"] == "ok"
+        assert rep9b["primary_probe"] == "alive"
+print("T9 run_check/get_cached_result: PASS（15 名外补探、统计准确、强制重跑继承主模型）")
+
+# ---------- 10. available：完整可用池，供意图路由挑 Top5 之外的 coder 模型 ----------
+rep10 = orm.build_report(cat9, usage9, {}, top_n=5, days=7, today=NOW, probed=False)
+assert len(rep10["top"]) == 5
+assert len(rep10["available"]) == 20, len(rep10["available"])
+ids10 = {m["id"] for m in rep10["available"]}
+assert "v/m19:free" in ids10, "Top5 之外的模型必须也在池里，否则代码类找不到 coder"
+assert all(set(m) == {"id", "tools", "reasoning", "context_length"} for m in rep10["available"])
+print("T10 available: PASS（完整候选池 20 个，字段精简且含 Top5 之外的模型）")
+
 print("ALL_UNIT_TESTS_PASS")

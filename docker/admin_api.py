@@ -402,9 +402,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const ps = data.primary_status || 'not_configured';
                 if (ps !== 'not_configured' && data.primary) {
                     const psBadge = ps === 'ok'
-                        ? '<span class="badge badge-green">✓ 可用</span>'
+                        ? '<span class="badge badge-green">✓ 目录可用</span>'
                         : `<span class="badge badge-red">✗ 已下线（${ps === 'expired' ? '已过下架日' : '转付费/除名'}），将自动切换</span>`;
-                    html = `<div style="margin-bottom:0.5rem;font-size:0.8rem;">主模型 <span class="mono">${data.primary}</span> ${psBadge}</div>` + html;
+                    const pp = data.primary_probe;
+                    const ppBadge = pp === 'alive' ? '<span class="badge badge-green">✓ 探活正常</span>'
+                        : pp === 'dead' ? '<span class="badge badge-red">✗ 探活失败</span>'
+                        : pp === 'unknown' ? '<span class="badge badge-yellow">⚠ 本次未确认</span>'
+                        : '<span class="badge badge-gray">未探活</span>';
+                    html = `<div style="margin-bottom:0.5rem;font-size:0.8rem;">主模型 <span class="mono">${data.primary}</span> ${psBadge} ${ppBadge}</div>` + html;
+                    // 目录说可用、实测却不可用 = 目录尚未更新的"悄悄下线"，自动切换不会触发
+                    if (pp === 'dead' && ps === 'ok') {
+                        html = `<div class="alert" style="background-color:#fef2f2;border-left-color:#dc2626;color:#991b1b;">
+                            ⚠ <b>主模型疑似已悄悄下线</b>：OpenRouter 目录仍标记为免费可用，但实测请求返回不可用。
+                            自动切换只依据目录事实（避免限流误判导致反复重启），因此这次不会自动换模型。
+                            建议先点「重新检测」复核；若仍失败，把 Space 变量
+                            <span class="mono">OPENCLAW_DEFAULT_MODEL</span> 改成下表中探活正常的模型后重启。
+                        </div>` + html;
+                    }
                 }
                 box.innerHTML = html;
             } catch (e) {

@@ -75,6 +75,7 @@ COPY docker/openclaw.template.json /app/docker/openclaw.template.json
 COPY docker/hf-state-store.py /app/docker/hf-state-store.py
 COPY docker/backup_api.py /app/docker/backup_api.py
 COPY docker/openrouter_proxy.py /app/docker/openrouter_proxy.py
+COPY docker/model_router.py /app/docker/model_router.py
 COPY docker/openrouter_models.py /app/docker/openrouter_models.py
 COPY docker/admin_api.py /app/docker/admin_api.py
 

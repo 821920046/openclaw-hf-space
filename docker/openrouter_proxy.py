@@ -15,6 +15,8 @@ import time
 import threading
 from itertools import cycle
 
+import model_router
+
 PORT = 18780
 CONNECT_TIMEOUT = 10   # 连接超时（秒）
 READ_TIMEOUT = 120     # 读取超时（秒）
@@ -85,6 +87,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else None
+
+        # 按用户消息意图路由到更合适的免费模型（默认关闭；仅作用于对话补全请求）。
+        # 改写后 body 长度会变，但转发时排除了 Content-Length 头，requests 会自动重算。
+        if method == "POST" and "/chat/completions" in self.path:
+            routed, note = model_router.route_body(
+                body,
+                enabled=os.environ.get("OPENCLAW_MODEL_ROUTING", "0") == "1",
+                default_model=os.environ.get("OPENCLAW_DEFAULT_MODEL", ""),
+                pool_path=os.environ.get("OPENROUTER_FREE_MODELS_FILE", "/app/docker/free-models.json"),
+            )
+            if routed is not None:
+                body = routed
+            if note:
+                model_router.log(note)
 
         # 转发到 OpenRouter
         url = "https://openrouter.ai" + self.path

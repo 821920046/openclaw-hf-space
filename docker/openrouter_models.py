@@ -268,18 +268,31 @@ def build_report(catalog: list[dict], usage: dict[str, dict], probe_results: dic
     for rank, c in enumerate(final[:top_n], 1):
         c["rank"] = rank
 
+    # 主模型探活结论：仅供控制台观察告警，绝不参与 primary_status（切换/重启）判定。
+    # 目录未更新但模型已不可用时，只有探活能发现；若据此重启，限流等瞬时失败会引发重启循环。
+    primary_probe = None
+    if primary_id and primary_id not in ("free", "auto"):
+        primary_probe = "skipped" if not probed else probe_results.get(primary_id, ("unknown", "not probed"))[0]
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "window_days": days,
         "probed": probed,
         "primary": primary_id or None,
         "primary_status": primary_status(catalog, primary_id, today),
+        "primary_probe": primary_probe,
         "top": final[:top_n],
+        # 完整可用池（不只 Top5）：供按意图路由挑 coder / 长上下文模型，只保留路由需要的字段
+        "available": [
+            {"id": c["id"], "tools": c["tools"], "reasoning": c["reasoning"],
+             "context_length": c["context_length"]}
+            for c in final
+        ],
         "excluded": excluded,
         "stats": {
             "free_in_catalog": sum(1 for m in catalog if is_free(m)),
             "chat_candidates": len(candidates),
-            "probed": sum(1 for c in candidates[:PROBE_CANDIDATES] if probed),
+            "probed": len(probe_results) if probed else 0,
             "excluded": len(excluded),
         },
     }
@@ -294,6 +307,8 @@ def print_report(report: dict) -> None:
     if pstat != "not_configured":
         log(f"主模型 {report.get('primary')} 状态: {pstat}"
             + ("（已下线，需切换）" if pstat in ("delisted", "expired") else ""))
+    if report.get("primary_probe") == "dead" and pstat == "ok":
+        log("WARNING: 主模型目录仍标记可用但探活不可用（可能已悄悄下线）；仅告警，不自动切换")
     if not top:
         log("未得到可用模型（详见 excluded）")
         return
@@ -337,6 +352,10 @@ def run_check(out_path: Path, top_n: int = 5, days: int = 7, use_probe: bool | N
     prelim = [m for m in catalog if is_free(m) and not is_router_entry(m) and is_chat_capable(m)]
     prelim.sort(key=lambda m: usage_sort_key(m, usage))
     probe_targets = [m.get("id") for m in prelim[:PROBE_CANDIDATES]]
+    # 主模型可能不在调用量前 15，单独补探一次：目录未更新时它是唯一能发现"悄悄下线"的信号。
+    # 结论只写入 primary_probe 供观察，不参与 primary_status / 切换 / 重启。
+    if primary_id and primary_id not in ("free", "auto") and primary_id not in probe_targets:
+        probe_targets.append(primary_id)
 
     probe_results: dict[str, tuple[str, str]] = {}
     if use_probe and probe_targets:
@@ -374,7 +393,9 @@ def get_cached_result(out_path: Path, max_age: int = 600, force: bool = False, t
                         return cached
                 except Exception:
                     pass
-        return run_check(out_path, top_n=top_n, days=days)
+        # 重跑时沿用上次报告里的主模型 ID，否则控制台「重新检测」后主模型状态/探活告警会消失
+        prev = load_result(out_path) or {}
+        return run_check(out_path, top_n=top_n, days=days, primary_id=prev.get("primary") or "")
 
 
 def main(argv: list[str] | None = None) -> int:
