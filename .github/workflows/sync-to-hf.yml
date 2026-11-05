@@ -1,0 +1,36 @@
+name: Sync to HF Space
+
+# 推送 GitHub 后，把仓库文件镜像到 Hugging Face Space 仓库。
+# HF Space 仓库每次收到新提交会自动 rebuild + restart，因此这里用文件同步而不是 git-to-git。
+# 注意：本仓库默认分支是 master，不是 main。
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# 避免并发同步同一 Space 造成提交交错；不取消正在运行的同步。
+concurrency:
+  group: sync-to-hf-space
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # 防止 fork 仓库也尝试同步到同一个 Space。
+    if: github.repository == '821920046/openclaw-hf-space'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Sync files to Hugging Face Space
+        uses: huggingface/hub-sync@v0.3.0
+        with:
+          github_repo_id: ${{ github.repository }}
+          huggingface_repo_id: suifenglexiaoyao/ClawBot
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
+          space_sdk: docker
+          # 之前 HF Space 由网页手动上传过文件，先不做镜像删除，避免误删 HF 端独有文件。
+          delete_removed: false

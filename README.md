@@ -254,11 +254,43 @@ Hugging Face 免费版 Space 在一段时间无活动后会进入休眠，首次
 - 如果你使用外部监控服务（如 UptimeRobot、cron-job.org）监控 `https://<space>/`，
    效果相同，可任选其一，不要叠加多个。
 
+## 推送 GitHub 后自动同步到 HF Space（推荐）
+
+Hugging Face Space 本身就是一个 Git 仓库；**只有把变更送进 HF Space 仓库**，Space 才会自动重建并重启。
+仅推送 GitHub 不会触发 HF 更新。本仓库通过 `.github/workflows/sync-to-hf.yml` 补齐这条链路：
+
+```text
+git push origin master
+  -> GitHub Actions: Sync to HF Space
+  -> huggingface/hub-sync 把文件镜像到 suifenglexiaoyao/ClawBot
+  -> HF Space 收到新提交，自动 rebuild + restart
+```
+
+配置方法（一次性）：
+
+1. 在 Hugging Face 创建一个有 **write** 权限的 Access Token。
+2. 在 **GitHub 仓库** `Settings -> Secrets and variables -> Actions -> Secrets` 新建 secret：
+   - `HF_TOKEN` = 上一步的 token
+   - 注意：这是 **GitHub Actions Secret**，用于同步文件；不要和 HF Space 里给 `hf-state-store.py` 做状态备份用的同名 Secret 混淆（可以是同一个 token，但配置位置不同）。
+3. 推送 `master` 后工作流自动运行；也可在 `Actions` 页手动 `Run workflow`（`workflow_dispatch`）验证。
+
+工作流细节：
+
+- 触发分支固定为 `master`（本仓库默认分支），不是 `main`。
+- 使用官方 `huggingface/hub-sync@v0.3.0`，按**文件内容**镜像，不是 git-to-git push，因此不会因 HF 端网页手动上传导致的历史分叉而 `non-fast-forward`。
+- 自动排除根目录 `.git*`（含 `.gitattributes`）和 `.github/`；`keepalive.yml` 只需留在 GitHub 端运行。
+- `delete_removed: false`：只上传/覆盖，不删除 HF 上已有的独有文件。若确认 HF 端没有需要保留的独有文件，可改成 `true` 变成完全镜像；**在 GitHub 删除文件时，false 模式下需要手动到 HF 删除，或临时切 true**。
+- `space_sdk: docker`：与当前 Space 的 SDK 一致。
+- 同步不会创建 HF Space 的 Secrets/Variables；运行时变量仍需在 Space 的 `Settings -> Variables and secrets` 单独配置（如 `OPENCLAW_MODEL_ROUTING=1`）。
+- `keepalive.yml` 与本工作流职责独立：前者每 15 分钟保活，后者在 push 时部署，两者应同时保留。
+
+如果不想用自动同步，仍可走手动路线：在 HF Space 网页上传文件，或配置 HF 凭据后 `git push hf master:main`（以 `git ls-remote --symref hf HEAD` 实测的默认分支为准）。
+
 ## 部署步骤
 
 1. 创建一个新的 Hugging Face Space。
 2. 选择 `Docker` 作为 SDK。
-3. 将此仓库的内容上传到 Space 仓库根目录。
+3. 将此仓库的内容上传到 Space 仓库根目录；若已启用上节的自动同步，推送 GitHub `master` 即可，无需手动上传。
 4. 添加必需的 secrets。
 5. 等待镜像构建完成。
 6. 打开 Space URL 并通过 `Basic Auth` 验证。
@@ -275,6 +307,8 @@ Space 根路径 `/` 保留用于 Hugging Face 健康检查，应返回纯文本 
 
 在第一次重新构建前创建以下项：
 
+- **GitHub 仓库 Secret（启用自动同步时）**
+  - `HF_TOKEN` = Hugging Face 写权限 token（配置在 GitHub 仓库的 Actions Secrets，不是 HF Space 里）
 - **必需项**
   - `BASIC_AUTH_USER`
   - `BASIC_AUTH_PASSWORD`
@@ -301,17 +335,17 @@ Space 根路径 `/` 保留用于 Hugging Face 健康检查，应返回纯文本 
   - `SPACE_HOST`
   - `OPENCLAW_CONFIG_JSON_B64`（当你希望将完整的 OpenClaw 配置作为 secret 存储时）
 
-推送仓库更新后，打开 Space 设置，确认上述 secrets，并触发重新构建。然后检查启动日志中的 `Installed OpenClaw ref:` 行，以确认容器确实在运行指定的版本。
+推送本仓库更新到 GitHub `master` 后，`.github/workflows/sync-to-hf.yml` 会自动把文件同步到 HF Space 并触发重建。若未启用自动同步，则需要手动上传文件，并在 Space 设置中确认上述 secrets 后执行 Factory rebuild。然后检查启动日志中的 `Installed OpenClaw ref:` 行，以确认容器确实在运行指定的版本。
 
-如果你更喜欢使用 Git 而非网页上传器：
+如果你更喜欢用 Git 直接推 HF Space（不经过 GitHub Actions）：
 
 ```bash
-git init
-git remote add origin https://huggingface.co/spaces/<用户名>/<Space名称>
-git add .
-git commit -m "feat: 增加 OpenClaw HF Docker 部署支持"
-git push origin main
+git remote add hf https://huggingface.co/spaces/<用户名>/<Space名称>
+git ls-remote --symref hf HEAD   # 先看 HF 默认分支是 main 还是 master
+git push hf master:main          # 若默认分支是 master，则改成 master:master
 ```
+
+本机已有 `hf` 远程时无需重复 `remote add`。网页手动上传过的 HF 仓库可能与本地历史分叉，此时普通 push 会报 `non-fast-forward`；不要直接强推，优先用网页上传或上面的自动同步（文件镜像）。
 
 ## 本地构建
 
@@ -342,6 +376,7 @@ docker run --rm -p 7860:7860 \
 - `docker/openrouter_models.py`: OpenRouter 免费模型监测（拉取目录 + 调用榜单，剔除下架/失效模型，按调用量输出 Top5）
 - `tests/test_openrouter_models.py`: 监测模块离线单元测试（mock 网络，覆盖过滤/聚合/排序/探测分类/Key 轮换）
 - `.github/workflows/keepalive.yml`: 每 15 分钟访问 Space 根路径，防止免费版 Space 休眠
+- `.github/workflows/sync-to-hf.yml`: 推送 `master` 后自动把仓库文件镜像到 HF Space，触发重建（需 GitHub Actions Secret `HF_TOKEN`）
 - `.gitignore` / `.dockerignore`: 阻止 `__pycache__`、`*.pyc`、`*.7z` 等垃圾进入部署仓库与构建上下文
 - `docker/start.sh` 内置飞书文档创建技能（启动时通过 heredoc 生成 `SKILL.md` + `create-doc.sh` 到 workspace）
 
@@ -364,7 +399,7 @@ docker run --rm -p 7860:7860 \
 
 这样构建时间从源码编译的 30-40 分钟降到 **2-5 分钟**，镜像体积也明显更小，因此可以放心地频繁重建来跟上游。
 
-**升级方式**：在 HF Space 页面点 **Settings → Factory rebuild**（或重新上传文件后重建）即可安装当时的最新版。控制台标题旁会显示当前版本；若 npm 上已有更新版本，会显示 `v当前 → v最新 可升级`。
+**升级方式**：推送一次 GitHub `master` 让自动同步触发重建，或在 HF Space 页面点 **Settings → Factory rebuild**（或重新上传文件后重建）即可安装当时的最新版。控制台标题旁会显示当前版本；若 npm 上已有更新版本，会显示 `v当前 → v最新 可升级`。
 
 **回滚**：把 Dockerfile 里 `ARG OPENCLAW_NPM_VERSION="latest"` 改成具体版本号（例如 `"2026.10.9"`），重新上传 Dockerfile 并重建即可。
 
@@ -855,7 +890,7 @@ FEISHU_ALLOW_FROM   = ou_xxx
 
 ### 部署步骤
 
-1. 用本仓库最新的 `docker/start.sh` 覆盖 HF Space 同名文件并提交（触发重建）。
+1. 用本仓库最新的 `docker/start.sh` 覆盖 HF Space 同名文件并提交（触发重建；现在也可以直接推 GitHub `master` 由自动同步完成）。
 2. 按上表配置/清理 Variables 与 Secrets。
 3. Restart Space，等状态变 Running。
 4. 在 `/openclaw/` 控制台 Skills 页关闭无用技能 → 等自动备份或手动 `/api/backup` → 再重启。
